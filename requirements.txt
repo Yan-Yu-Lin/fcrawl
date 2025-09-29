@@ -1,0 +1,6 @@
+click>=8.1.0
+rich>=13.0.0
+pyperclip>=1.8.0
+firecrawl-py>=1.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0
