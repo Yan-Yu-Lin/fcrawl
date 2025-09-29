@@ -17,6 +17,7 @@ from commands.scrape import scrape
 from commands.crawl import crawl
 from commands.map import map_site
 from commands.extract import extract
+from commands.search import search
 from utils.config import load_config, get_firecrawl_client
 
 console = Console()
@@ -43,6 +44,7 @@ cli.add_command(scrape)
 cli.add_command(crawl)
 cli.add_command(map_site, name='map')
 cli.add_command(extract)
+cli.add_command(search)
 
 @cli.command()
 def config():

@@ -5,8 +5,11 @@ A powerful command-line interface for Firecrawl, making web scraping as easy as 
 ## Features
 
 - 🚀 **Simple by default** - Just run `fcrawl scrape URL` to get markdown content
+- 🔍 **Web search** - Search the web with Google/Bing/DuckDuckGo (via SearXNG)
 - 📦 **Multiple formats** - Markdown, HTML, links, screenshots, and structured data
 - 🔄 **Batch operations** - Crawl entire websites or map site structures
+- 🎯 **Category filters** - Search GitHub repos, research papers, or general web
+- ⏰ **Time filters** - Search by date range (past hour/day/week/month/year)
 - 📋 **Clipboard support** - Copy results directly to clipboard
 - 🎨 **Beautiful output** - Syntax highlighting and formatted tables in terminal
 - 💾 **Flexible saving** - Save to files or pipe to other tools
@@ -114,6 +117,32 @@ fcrawl map https://docs.site.com --search "api"
 fcrawl map https://site.com --limit 100
 ```
 
+### Searching the Web
+
+```bash
+# Basic search
+fcrawl search "python tutorials"
+
+# Search specific sources
+fcrawl search "AI news" --sources news --limit 10
+fcrawl search "ML articles" --sources web --sources news
+
+# Search with category filters
+fcrawl search "web scraping python" --category github
+fcrawl search "machine learning papers" --category research
+
+# Time-based search
+fcrawl search "latest AI news" --tbs qdr:d  # past day
+fcrawl search "weekly tech news" --tbs qdr:w  # past week
+
+# Search and scrape results
+fcrawl search "python documentation" --scrape -f markdown
+fcrawl search "tutorials" --scrape -f markdown -o results.json
+
+# Location-based search
+fcrawl search "coffee shops" --location "New York"
+```
+
 ### Extract Structured Data
 
 ```bash
@@ -132,6 +161,9 @@ fcrawl extract url1 url2 url3 --fields "price,title"
 ```bash
 # Quick scrape (no options, just markdown to stdout)
 fcrawl quick https://example.com
+
+# Quick search
+fcrawl search "your query"
 
 # View configuration
 fcrawl config
@@ -171,6 +203,21 @@ abbr --add fcc 'fcrawl crawl'
 ### Daily News Digest
 ```bash
 fcrawl crawl https://news.ycombinator.com --limit 30 -o hn-today.json
+```
+
+### Research Assistant
+```bash
+# Find latest AI research papers
+fcrawl search "large language models" --category research --limit 20 -o ai-research.json
+
+# Find GitHub repos
+fcrawl search "web scraping python" --category github --limit 10
+```
+
+### News Aggregator
+```bash
+# Get today's tech news
+fcrawl search "AI breakthrough" --sources news --tbs qdr:d --scrape -o news-today.json
 ```
 
 ### Documentation Lookup
