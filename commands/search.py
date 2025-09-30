@@ -17,8 +17,8 @@ from utils.output import handle_output, console
 @click.option('--category', '-c', multiple=True,
               type=click.Choice(['github', 'research']),
               help='Category filters (github, research)')
-@click.option('--limit', '-l', type=int, default=5,
-              help='Maximum number of results per source (default: 5)')
+@click.option('--limit', '-l', type=int, default=15,
+              help='Maximum number of results per source (default: 15)')
 @click.option('--tbs',
               type=click.Choice(['qdr:h', 'qdr:d', 'qdr:w', 'qdr:m', 'qdr:y']),
               help='Time filter (h=hour, d=day, w=week, m=month, y=year)')
