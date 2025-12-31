@@ -8,6 +8,26 @@ from typing import List, Optional
 from ..utils.config import get_firecrawl_client
 from ..utils.output import handle_output, console
 
+
+def format_with_metadata(result, content: str) -> str:
+    """Prepend metadata header to content (like Jina's r.jina.ai output)"""
+    header_lines = []
+
+    if hasattr(result, 'metadata') and result.metadata:
+        md = result.metadata
+        if hasattr(md, 'title') and md.title:
+            header_lines.append(f"Title: {md.title}")
+        if hasattr(md, 'source_url') and md.source_url:
+            header_lines.append(f"URL Source: {md.source_url}")
+        elif hasattr(md, 'url') and md.url:
+            header_lines.append(f"URL Source: {md.url}")
+        if hasattr(md, 'published_time') and md.published_time:
+            header_lines.append(f"Published Time: {md.published_time}")
+
+    if header_lines:
+        return '\n'.join(header_lines) + '\n\nMarkdown Content:\n' + content
+    return content
+
 @click.command()
 @click.argument('url')
 @click.option('-f', '--format', 'formats', multiple=True,
@@ -76,6 +96,9 @@ def scrape(
         format_type = formats[0]
         if format_type == 'markdown' and hasattr(result, 'markdown'):
             content = result.markdown
+            # Prepend metadata header (like Jina) unless JSON output
+            if not json_output:
+                content = format_with_metadata(result, content)
         elif format_type == 'html' and hasattr(result, 'html'):
             content = result.html
         elif format_type == 'links' and hasattr(result, 'links'):
