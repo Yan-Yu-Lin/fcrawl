@@ -3,35 +3,22 @@
 import json
 import re
 import sys
-import time
+import tempfile
+import os
 from typing import Optional
 
 import click
-import requests
 import yt_dlp
-
-# Browser-like headers to avoid rate limiting
-HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept-Language': 'en-US,en;q=0.9',
-}
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ..utils.output import handle_output, console
 
 
 class YouTubeTranscriptDownloader:
-    """Download transcripts from YouTube videos using yt-dlp"""
+    """Download transcripts from YouTube videos using yt-dlp's native downloader"""
 
     def __init__(self, quiet: bool = False):
         self.quiet = quiet
-        self.ydl_opts = {
-            'writeautomaticsub': True,
-            'skip_download': True,
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,
-        }
 
     def log(self, msg: str):
         if not self.quiet:
@@ -51,9 +38,17 @@ class YouTubeTranscriptDownloader:
         return None
 
     def get_transcript(self, video_url: str, preferred_lang: Optional[str] = None) -> dict:
-        """Get transcript and metadata from a YouTube video"""
-        with yt_dlp.YoutubeDL(self.ydl_opts) as ydl:
-            try:
+        """Get transcript and metadata from a YouTube video using yt-dlp's native downloader"""
+
+        # First, get video info to find available languages
+        info_opts = {
+            'skip_download': True,
+            'quiet': True,
+            'no_warnings': True,
+        }
+
+        try:
+            with yt_dlp.YoutubeDL(info_opts) as ydl:
                 info = ydl.extract_info(video_url, download=False)
 
                 title = info.get('title', 'Unknown')
@@ -103,50 +98,51 @@ class YouTubeTranscriptDownloader:
                         if not selected_lang:
                             selected_lang = available_langs[0]
 
-                # Get subtitle URL
-                caption_url = None
-                caption_format = None
+            # Now download subtitles using yt-dlp's native downloader
+            with tempfile.TemporaryDirectory() as tmpdir:
+                sub_opts = {
+                    'skip_download': True,
+                    'writesubtitles': True,
+                    'writeautomaticsub': True,
+                    'subtitleslangs': [selected_lang],
+                    'subtitlesformat': 'vtt/best',
+                    'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                    'quiet': True,
+                    'no_warnings': True,
+                    'noprogress': True,
+                    'logger': type('QuietLogger', (), {'debug': lambda *a: None, 'warning': lambda *a: None, 'error': lambda *a: None})(),
+                }
 
-                for caption in all_captions[selected_lang]:
-                    ext = caption.get('ext')
-                    if ext == 'vtt':
-                        caption_url = caption['url']
-                        caption_format = 'vtt'
+                with yt_dlp.YoutubeDL(sub_opts) as ydl:
+                    ydl.download([video_url])
+
+                # Find the downloaded subtitle file
+                subtitle_content = None
+                for filename in os.listdir(tmpdir):
+                    if filename.endswith('.vtt') or filename.endswith('.srt'):
+                        with open(os.path.join(tmpdir, filename), 'r', encoding='utf-8') as f:
+                            subtitle_content = f.read()
                         break
+                    elif filename.endswith('.json3'):
+                        with open(os.path.join(tmpdir, filename), 'r', encoding='utf-8') as f:
+                            subtitle_content = f.read()
+                        # Parse JSON3 format
+                        transcript = self._parse_json3(subtitle_content)
+                        return {
+                            "title": title,
+                            "video_id": video_id,
+                            "channel": channel,
+                            "duration": duration,
+                            "language": selected_lang,
+                            "available_languages": available_langs,
+                            "transcript": transcript
+                        }
 
-                if not caption_url:
-                    for caption in all_captions[selected_lang]:
-                        ext = caption.get('ext')
-                        if ext in ['srv1', 'srv2', 'srv3', 'json3']:
-                            caption_url = caption['url']
-                            caption_format = ext
-                            break
+                if not subtitle_content:
+                    return {"error": "Could not download subtitles"}
 
-                if not caption_url:
-                    return {"error": "Could not get subtitle URL"}
-
-                # Download subtitle with retry logic
-                for attempt in range(3):
-                    try:
-                        response = requests.get(caption_url, headers=HEADERS, timeout=30)
-                        response.raise_for_status()
-                        break
-                    except requests.exceptions.HTTPError as e:
-                        if e.response.status_code == 429 and attempt < 2:
-                            time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s
-                            continue
-                        raise
-                    except requests.exceptions.RequestException:
-                        if attempt < 2:
-                            time.sleep(1)
-                            continue
-                        raise
-
-                # Parse
-                if caption_format == 'json3':
-                    transcript = self._parse_json3(response.text)
-                else:
-                    transcript = self._parse_vtt(response.text)
+                # Parse VTT format
+                transcript = self._parse_vtt(subtitle_content)
 
                 return {
                     "title": title,
@@ -158,42 +154,37 @@ class YouTubeTranscriptDownloader:
                     "transcript": transcript
                 }
 
-            except yt_dlp.utils.DownloadError as e:
-                return {"error": f"Download error: {str(e)}"}
-            except Exception as e:
-                return {"error": f"Error: {str(e)}"}
+        except yt_dlp.utils.DownloadError as e:
+            return {"error": f"Download error: {str(e)}"}
+        except Exception as e:
+            return {"error": f"Error: {str(e)}"}
 
     def _parse_vtt(self, text: str) -> str:
         """Parse VTT subtitle format to plain text"""
-        # Handle M3U8 playlist
-        if text.startswith('#EXTM3U'):
-            urls = re.findall(r'https://[^\s]+', text)
-            if urls:
-                try:
-                    response = requests.get(urls[0], headers=HEADERS, timeout=30)
-                    text = response.text
-                except:
-                    pass
-
         lines = []
         for line in text.split('\n'):
-            if line.startswith('WEBVTT'):
+            stripped = line.strip()
+            if not stripped:
                 continue
-            if '-->' in line:
+            if stripped.startswith('WEBVTT'):
                 continue
-            if not line.strip() or line.strip().isdigit():
+            if stripped.startswith('Kind:') or stripped.startswith('Language:') or stripped.startswith('NOTE'):
+                continue
+            if '-->' in stripped:
+                continue
+            if stripped.isdigit():
                 continue
 
             # Clean HTML tags
-            clean = re.sub('<[^>]+>', '', line)
+            clean = re.sub('<[^>]+>', '', stripped)
             clean = clean.replace('&nbsp;', ' ')
             clean = clean.replace('&amp;', '&')
             clean = clean.replace('&lt;', '<')
             clean = clean.replace('&gt;', '>')
             clean = clean.replace('&quot;', '"')
 
-            if clean.strip():
-                lines.append(clean.strip())
+            if clean:
+                lines.append(clean)
 
         # Remove consecutive duplicates
         result = []
