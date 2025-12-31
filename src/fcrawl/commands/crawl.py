@@ -136,15 +136,17 @@ def crawl(
     \b
     NOTE: Crawl relies on Firecrawl's link discovery, which may not work
     on all sites (especially JS-heavy or anti-bot protected sites).
-    If crawl returns fewer pages than expected, try 'fcrawl map' first
-    to check what URLs Firecrawl can discover.
+
+    \b
+    WORKAROUND if crawl doesn't discover links:
+        1. fcrawl scrape URL -f links   # Get all links on page
+        2. fcrawl scrape each link as needed
 
     \b
     Examples:
         fcrawl crawl https://blog.com --limit 10
         fcrawl crawl https://docs.site.com --depth 2
         fcrawl crawl https://site.com -o ./my-docs/
-        fcrawl crawl https://site.com --exclude-paths "/admin/*"
     """
     # Prepare crawl options
     crawl_options = {

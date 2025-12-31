@@ -26,19 +26,26 @@ def cli(ctx):
     """
     fcrawl - Firecrawl CLI Tool
 
-    Simple and powerful web scraping from your terminal.
+    Simple and powerful web scraping for Claude Code.
 
     \b
     Quick start:
         fcrawl scrape https://example.com           # Scrape to terminal
         fcrawl scrape https://example.com -o out.md # Save to file
-        fcrawl scrape https://example.com > out.md  # Or pipe to file
+        fcrawl scrape https://example.com -f links  # Get links only
 
     \b
     More commands:
         fcrawl crawl https://blog.com --limit 10    # Crawl site to folder
         fcrawl map https://docs.site.com            # Discover URLs
         fcrawl search "query" --scrape              # Web search + scrape
+
+    \b
+    Notes:
+        - extract: NOT WORKING. Use a sub-agent with scrape instead.
+        - crawl: May not discover links on some sites. Workaround:
+          1. fcrawl scrape URL -f links  (discover links)
+          2. fcrawl scrape each link as needed
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
