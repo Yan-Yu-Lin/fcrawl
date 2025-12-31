@@ -61,7 +61,7 @@ def crawl(
     }
 
     if depth:
-        crawl_options['max_depth'] = depth
+        crawl_options['max_discovery_depth'] = depth
 
     if include_paths:
         crawl_options['include_paths'] = list(include_paths)
