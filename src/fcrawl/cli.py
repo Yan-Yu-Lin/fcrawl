@@ -13,6 +13,8 @@ from .commands.crawl import crawl
 from .commands.map import map_site
 from .commands.extract import extract
 from .commands.search import search
+from .commands.yt_transcript import yt_transcript
+from .commands.yt_channel import yt_channel
 from .utils.config import load_config, get_firecrawl_client
 
 console = Console()
@@ -40,6 +42,8 @@ cli.add_command(crawl)
 cli.add_command(map_site, name='map')
 cli.add_command(extract)
 cli.add_command(search)
+cli.add_command(yt_transcript)
+cli.add_command(yt_channel)
 
 @cli.command()
 def config():
