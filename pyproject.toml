@@ -5,8 +5,15 @@ description = "A powerful CLI tool for Firecrawl - web scraping from your termin
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "aiosqlite>=0.22.1",
+    "beautifulsoup4>=4.14.3",
     "click>=8.3.1",
+    "fake-useragent>=2.0.0",
     "firecrawl-py>=4.12.0",
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "orjson>=3.11.5",
+    "pyotp>=2.9.0",
     "pyperclip>=1.11.0",
     "python-dotenv>=1.2.1",
     "rich>=14.2.0",
