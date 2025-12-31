@@ -68,4 +68,5 @@ output/
 *.json
 *.md
 !README.md
+!CLAUDE.md
 !requirements.txt
