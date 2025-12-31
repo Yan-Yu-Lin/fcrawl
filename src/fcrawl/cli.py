@@ -5,20 +5,15 @@ Simple web scraping from your terminal
 """
 
 import click
-import sys
-from pathlib import Path
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-# Add the current directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent))
-
-from commands.scrape import scrape
-from commands.crawl import crawl
-from commands.map import map_site
-from commands.extract import extract
-from commands.search import search
-from utils.config import load_config, get_firecrawl_client
+from .commands.scrape import scrape
+from .commands.crawl import crawl
+from .commands.map import map_site
+from .commands.extract import extract
+from .commands.search import search
+from .utils.config import load_config, get_firecrawl_client
 
 console = Console()
 
@@ -58,7 +53,7 @@ def config():
 @click.argument('url')
 def quick(url):
     """Quick scrape with default settings (markdown to stdout)"""
-    from utils.output import display_content
+    from .utils.output import display_content
 
     with Progress(
         SpinnerColumn(),
@@ -70,7 +65,7 @@ def quick(url):
         client = get_firecrawl_client()
         result = client.scrape(url, formats=['markdown'])
 
-        progress.update(task, completed=True)
+        progress.stop()
 
     display_content(result.markdown, format_type='markdown')
 

@@ -5,8 +5,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from typing import Optional
 
-from utils.config import get_firecrawl_client
-from utils.output import handle_output, console
+from ..utils.config import get_firecrawl_client
+from ..utils.output import handle_output, console
 
 @click.command('map')
 @click.argument('url')
