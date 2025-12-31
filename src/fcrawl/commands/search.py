@@ -7,6 +7,7 @@ from typing import List, Optional
 
 from ..utils.config import get_firecrawl_client
 from ..utils.output import handle_output, console, strip_links
+from ..utils.cache import cache_key, read_cache, write_cache
 
 @click.command()
 @click.argument('query')

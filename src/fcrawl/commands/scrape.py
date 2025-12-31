@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 
 from ..utils.config import get_firecrawl_client
 from ..utils.output import handle_output, console, strip_links
+from ..utils.cache import cache_key, read_cache, write_cache, result_to_dict, CachedResult
 
 
 # Article mode: aggressive filtering for clean article extraction
@@ -138,6 +139,8 @@ def format_with_metadata(result, content: str) -> str:
               help='Strip markdown links, keep display text')
 @click.option('--wait', type=int, help='Wait time in milliseconds before scraping')
 @click.option('--screenshot-full', is_flag=True, help='Take full page screenshot')
+@click.option('--no-cache', 'no_cache', is_flag=True, help='Bypass cache, force fresh fetch')
+@click.option('--cache-only', 'cache_only', is_flag=True, help='Only read from cache, no API call')
 def scrape(
     url: str,
     formats: List[str],
@@ -152,6 +155,8 @@ def scrape(
     no_links: bool,
     wait: Optional[int],
     screenshot_full: bool,
+    no_cache: bool,
+    cache_only: bool,
 ):
     """Scrape a single URL and extract content
 
@@ -190,23 +195,53 @@ def scrape(
     if screenshot_full and 'screenshot' in formats:
         scrape_options['screenshot'] = {'fullPage': True}
 
-    # Show progress
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console
-    ) as progress:
-        task = progress.add_task(f"Scraping {url}...", total=None)
+    # Generate cache key based on options that affect API result
+    cache_opts = {
+        'formats': list(formats),
+        'article': article,
+        'raw': raw,
+        'include_tags': list(include_tags) if include_tags else None,
+        'exclude_tags': list(exclude_tags) if exclude_tags else None,
+        'wait': wait,
+    }
+    key = cache_key(url, cache_opts)
 
-        try:
-            client = get_firecrawl_client()
-            result = client.scrape(url, **scrape_options)
-            progress.stop()
+    # Check cache first (unless --no-cache)
+    result = None
+    from_cache = False
+    if not no_cache:
+        cached = read_cache('scrape', key)
+        if cached:
+            result = CachedResult(cached)
+            from_cache = True
+            console.print(f"[dim]Using cached result[/dim]")
 
-        except Exception as e:
-            progress.stop()
-            console.print(f"[red]Error: {e}[/red]")
-            raise click.Abort()
+    # Handle --cache-only
+    if cache_only and not from_cache:
+        console.print(f"[red]Not in cache: {url}[/red]")
+        raise click.Abort()
+
+    # Fetch from API if not cached
+    if not from_cache:
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            task = progress.add_task(f"Scraping {url}...", total=None)
+
+            try:
+                client = get_firecrawl_client()
+                result = client.scrape(url, **scrape_options)
+                progress.stop()
+
+                # Write to cache
+                write_cache('scrape', key, result_to_dict(result))
+
+            except Exception as e:
+                progress.stop()
+                console.print(f"[red]Error: {e}[/red]")
+                raise click.Abort()
 
     # Handle output AFTER progress is done
     if len(formats) == 1:
