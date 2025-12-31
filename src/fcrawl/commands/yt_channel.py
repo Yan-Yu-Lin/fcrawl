@@ -8,6 +8,7 @@ from typing import Optional
 import click
 import yt_dlp
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 from ..utils.output import console
 
@@ -274,20 +275,35 @@ def yt_channel(
             print(output_text)
 
     else:
-        # Human-readable output (same format for TTY and non-TTY, just with/without colors)
+        # Human-readable output
         if is_tty:
+            # Rich table with clickable titles
             console.print(f"[bold]Channel:[/bold] {result['channel']}")
             console.print(f"[bold]Total {result['content_type']}:[/bold] {result['total_count']}")
             console.print(f"[bold]Showing:[/bold] {result['returned_count']} (sorted by {result['sort']})")
             if result.get('search'):
                 console.print(f"[bold]Search:[/bold] '{result['search']}'")
-            console.print("-" * 60)
+            console.print()
+
+            table = Table(show_header=True, header_style="bold cyan")
+            table.add_column("#", style="dim", width=4)
+            table.add_column("Duration", width=10)
+            table.add_column("Title", no_wrap=False)
+            table.add_column("Views", justify="right", width=12)
 
             for video in result["videos"]:
                 views_str = f"{video['views']:,}" if video['views'] else "N/A"
-                console.print(f"[dim]{video['index']:3d}.[/dim] [cyan][{video['duration_human']:>8}][/cyan] {video['title'][:50]}")
-                console.print(f"     {views_str} views | {video['url']}")
-                console.print()
+                # Make title clickable
+                title = video['title'][:60] + ("..." if len(video['title']) > 60 else "")
+                clickable_title = f"[link={video['url']}]{title}[/link]"
+                table.add_row(
+                    str(video['index']),
+                    video['duration_human'],
+                    clickable_title,
+                    views_str
+                )
+
+            console.print(table)
 
         else:
             print(f"Channel: {result['channel']}")
