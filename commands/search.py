@@ -3,7 +3,6 @@
 import click
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
-from rich.table import Table
 from typing import List, Optional
 
 from utils.config import get_firecrawl_client
@@ -95,7 +94,7 @@ def search(
             client = get_firecrawl_client()
             result = client.search(**search_options)
 
-            progress.update(task, completed=True)
+            progress.stop()
 
             # Process results
             total_results = 0
@@ -147,69 +146,47 @@ def search(
 
 
 def _display_search_results(result, include_content: bool):
-    """Display search results in a pretty table"""
+    """Display search results in clean text format"""
+
+    def _print_results(items, title_emoji: str):
+        """Print a section of results"""
+        # Centered header
+        console.print(f"\n[bold]{title_emoji}[/bold]", justify="center")
+        console.print("─" * 60)
+
+        for item in items:
+            title = getattr(item, 'title', 'No title')
+            url = getattr(item, 'url', '')
+            description = getattr(item, 'description', '')
+
+            # Title
+            console.print(f"[bold cyan]## {title}[/bold cyan]")
+            # URL
+            console.print(f"[blue]{url}[/blue]")
+            # Description
+            if description:
+                console.print(f"{description}")
+            # Content preview if scraped
+            if include_content:
+                content = getattr(item, 'markdown', '')
+                if content:
+                    preview = content[:200] + '...' if len(content) > 200 else content
+                    console.print(f"[dim]{preview}[/dim]")
+            console.print()
+
+        console.print("─" * 60)
 
     # Display web results
     if hasattr(result, 'web') and result.web:
-        table = Table(title="🌐 Web Results")
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Title", style="cyan", no_wrap=False)
-        table.add_column("URL", style="blue", no_wrap=False)
-        if include_content:
-            table.add_column("Content", style="green")
-
-        for i, item in enumerate(result.web, 1):
-            title = getattr(item, 'title', 'No title')
-            url = getattr(item, 'url', '')
-
-            # Truncate for display
-            title_display = title[:60] + '...' if len(title) > 60 else title
-            url_display = url[:50] + '...' if len(url) > 50 else url
-
-            if include_content:
-                content = getattr(item, 'markdown', '')
-                content_preview = content[:100] + '...' if content else 'N/A'
-                table.add_row(str(i), title_display, url_display, content_preview)
-            else:
-                table.add_row(str(i), title_display, url_display)
-
-        console.print(table)
+        _print_results(result.web, "🌐 Web Results")
 
     # Display news results
     if hasattr(result, 'news') and result.news:
-        table = Table(title="📰 News Results")
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Title", style="cyan", no_wrap=False)
-        table.add_column("URL", style="blue", no_wrap=False)
-
-        for i, item in enumerate(result.news, 1):
-            title = getattr(item, 'title', 'No title')
-            url = getattr(item, 'url', '')
-
-            title_display = title[:60] + '...' if len(title) > 60 else title
-            url_display = url[:50] + '...' if len(url) > 50 else url
-
-            table.add_row(str(i), title_display, url_display)
-
-        console.print(table)
+        _print_results(result.news, "📰 News Results")
 
     # Display image results
     if hasattr(result, 'images') and result.images:
-        table = Table(title="🖼️  Image Results")
-        table.add_column("#", style="dim", width=4)
-        table.add_column("Title", style="cyan", no_wrap=False)
-        table.add_column("URL", style="blue", no_wrap=False)
-
-        for i, item in enumerate(result.images, 1):
-            title = getattr(item, 'title', 'No title')
-            url = getattr(item, 'url', '')
-
-            title_display = title[:60] + '...' if len(title) > 60 else title
-            url_display = url[:50] + '...' if len(url) > 50 else url
-
-            table.add_row(str(i), title_display, url_display)
-
-        console.print(table)
+        _print_results(result.images, "🖼️  Image Results")
 
 
 def _format_result(item, include_content: bool) -> dict:
