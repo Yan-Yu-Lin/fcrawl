@@ -84,3 +84,82 @@ class CachedMetadata:
     def __init__(self, data: dict):
         for key, value in data.items():
             setattr(self, key, value)
+
+
+def search_result_to_dict(result) -> dict:
+    """Convert Firecrawl search result to cacheable dict"""
+    data = {}
+
+    def item_to_dict(item):
+        d = {}
+        for attr in ['url', 'title', 'description', 'markdown', 'html', 'links']:
+            if hasattr(item, attr):
+                d[attr] = getattr(item, attr)
+        if hasattr(item, 'metadata') and item.metadata:
+            d['metadata'] = item.metadata.__dict__ if hasattr(item.metadata, '__dict__') else item.metadata
+        return d
+
+    if hasattr(result, 'web') and result.web:
+        data['web'] = [item_to_dict(i) for i in result.web]
+    if hasattr(result, 'news') and result.news:
+        data['news'] = [item_to_dict(i) for i in result.news]
+    if hasattr(result, 'images') and result.images:
+        data['images'] = [item_to_dict(i) for i in result.images]
+
+    return data
+
+
+class CachedSearchItem:
+    """Wrapper for cached search result item"""
+    def __init__(self, data: dict):
+        for key, value in data.items():
+            if key == 'metadata' and isinstance(value, dict):
+                setattr(self, key, CachedMetadata(value))
+            else:
+                setattr(self, key, value)
+
+
+class CachedSearchResult:
+    """Wrapper to make cached search dict behave like Firecrawl search result"""
+    def __init__(self, data: dict):
+        self.web = [CachedSearchItem(i) for i in data.get('web', [])] if 'web' in data else None
+        self.news = [CachedSearchItem(i) for i in data.get('news', [])] if 'news' in data else None
+        self.images = [CachedSearchItem(i) for i in data.get('images', [])] if 'images' in data else None
+
+
+def crawl_result_to_dict(result) -> dict:
+    """Convert Firecrawl crawl result to cacheable dict"""
+    data = {'pages': []}
+
+    if hasattr(result, 'data') and result.data:
+        for page in result.data:
+            page_data = {}
+            if hasattr(page, 'markdown'):
+                page_data['markdown'] = page.markdown
+            if hasattr(page, 'html'):
+                page_data['html'] = page.html
+            if hasattr(page, 'links'):
+                page_data['links'] = page.links
+            if hasattr(page, 'metadata') and page.metadata:
+                page_data['metadata'] = page.metadata.__dict__ if hasattr(page.metadata, '__dict__') else page.metadata
+            data['pages'].append(page_data)
+
+    return data
+
+
+class CachedCrawlPage:
+    """Wrapper for cached crawl page"""
+    def __init__(self, data: dict):
+        self.markdown = data.get('markdown')
+        self.html = data.get('html')
+        self.links = data.get('links')
+        if 'metadata' in data:
+            self.metadata = CachedMetadata(data['metadata'])
+        else:
+            self.metadata = None
+
+
+class CachedCrawlResult:
+    """Wrapper to make cached crawl dict behave like Firecrawl crawl result"""
+    def __init__(self, data: dict):
+        self.data = [CachedCrawlPage(p) for p in data.get('pages', [])]
