@@ -28,6 +28,12 @@ def extract(
 ):
     """Extract structured data from URLs using AI
 
+    \b
+    TIP: For flexible extraction, you can also use Claude Agent with
+    Firecrawl MCP tools: scrape a page and ask Claude to extract/summarize
+    the content in any format you need.
+
+    \b
     Examples:
         fcrawl extract https://store.com --fields "price,title,description"
         fcrawl extract https://store.com --prompt "Extract product information"

@@ -28,10 +28,17 @@ def cli(ctx):
 
     Simple and powerful web scraping from your terminal.
 
-    Examples:
-        fcrawl scrape https://example.com
-        fcrawl crawl https://blog.com --limit 10
-        fcrawl map https://docs.site.com --search "api"
+    \b
+    Quick start:
+        fcrawl scrape https://example.com           # Scrape to terminal
+        fcrawl scrape https://example.com -o out.md # Save to file
+        fcrawl scrape https://example.com > out.md  # Or pipe to file
+
+    \b
+    More commands:
+        fcrawl crawl https://blog.com --limit 10    # Crawl site to folder
+        fcrawl map https://docs.site.com            # Discover URLs
+        fcrawl search "query" --scrape              # Web search + scrape
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())

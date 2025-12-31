@@ -133,6 +133,13 @@ def crawl(
 ):
     """Crawl a website and save pages as markdown files
 
+    \b
+    NOTE: Crawl relies on Firecrawl's link discovery, which may not work
+    on all sites (especially JS-heavy or anti-bot protected sites).
+    If crawl returns fewer pages than expected, try 'fcrawl map' first
+    to check what URLs Firecrawl can discover.
+
+    \b
     Examples:
         fcrawl crawl https://blog.com --limit 10
         fcrawl crawl https://docs.site.com --depth 2
