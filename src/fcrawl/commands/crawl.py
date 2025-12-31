@@ -6,7 +6,7 @@ from rich.console import Console
 from typing import Optional, List
 
 from ..utils.config import get_firecrawl_client
-from ..utils.output import handle_output, console
+from ..utils.output import handle_output, console, strip_links
 
 @click.command()
 @click.argument('url')
@@ -21,6 +21,7 @@ from ..utils.output import handle_output, console
 @click.option('--exclude-paths', multiple=True, help='Skip URLs matching these patterns')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 @click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
+@click.option('--no-links', is_flag=True, help='Strip markdown links from output')
 @click.option('--poll-interval', type=int, default=2, help='Polling interval in seconds')
 @click.option('--timeout', type=int, default=300, help='Timeout in seconds')
 def crawl(
@@ -33,6 +34,7 @@ def crawl(
     exclude_paths: List[str],
     json_output: bool,
     pretty: bool,
+    no_links: bool,
     poll_interval: int,
     timeout: int
 ):
@@ -125,7 +127,10 @@ def crawl(
                         if hasattr(page, 'metadata'):
                             page_data['metadata'] = page.metadata.__dict__ if hasattr(page.metadata, '__dict__') else page.metadata
                         if 'markdown' in formats and hasattr(page, 'markdown'):
-                            page_data['markdown'] = page.markdown
+                            md = page.markdown
+                            if no_links:
+                                md = strip_links(md)
+                            page_data['markdown'] = md
                         if 'html' in formats and hasattr(page, 'html'):
                             page_data['html'] = page.html
                         if 'links' in formats and hasattr(page, 'links'):
@@ -143,7 +148,10 @@ def crawl(
                     # Raw output for piping
                     for page in result.data:
                         if hasattr(page, 'markdown'):
-                            print(page.markdown)
+                            md = page.markdown
+                            if no_links:
+                                md = strip_links(md)
+                            print(md)
                             print("\n---\n")  # Page separator
 
             else:

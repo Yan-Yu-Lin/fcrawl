@@ -1,6 +1,7 @@
 """Output handling utilities for fcrawl"""
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List
@@ -12,6 +13,27 @@ from rich import print as rprint
 import pyperclip
 
 console = Console()
+
+
+def strip_links(content: str) -> str:
+    """Remove markdown links, preserving display text. Images get [Image: alt] marker."""
+    # Nested image links: [![alt](img)](url) → [Image: alt]
+    content = re.sub(r'\[!\[([^\]]*)\]\([^)]+\)\]\([^)]+\)', r'[Image: \1]', content)
+    # Images with alt: ![alt](url) → [Image: alt]
+    content = re.sub(r'!\[([^\]]+)\]\([^)]+\)', r'[Image: \1]', content)
+    # Images without alt: ![](url) → [Image]
+    content = re.sub(r'!\[\]\([^)]+\)', '[Image]', content)
+    # Wikipedia-style citations: [\[N\]](url) or [[note N]](url) → [N] or [note N]
+    content = re.sub(r'\[\\?\[([^\]]+)\\?\]\]\([^)]+\)', r'[\1]', content)
+    # Links with brackets inside text: [text [with brackets]](url) → text [with brackets]
+    content = re.sub(r'\[([^\]]+(?:\[[^\]]+\][^\]]*)*)\]\(https?://[^)]+(?:\s+"[^"]*")?\)', r'\1', content)
+    # Run link removal multiple times to handle remaining cases
+    for _ in range(3):
+        # Links: [text](url) → text (handles simple cases)
+        content = re.sub(r'\[([^\[\]]+)\]\([^)]+\)', r'\1', content)
+    # Clean up stray escaped brackets: \[ → [ and \] → ]
+    content = re.sub(r'\\([\[\]])', r'\1', content)
+    return content
 
 def display_content(content: Any, format_type: str = 'markdown', pretty: bool = True):
     """Display content in the terminal with formatting"""

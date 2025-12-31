@@ -6,7 +6,7 @@ from rich.console import Console
 from typing import List, Optional
 
 from ..utils.config import get_firecrawl_client
-from ..utils.output import handle_output, console
+from ..utils.output import handle_output, console, strip_links
 
 @click.command()
 @click.argument('query')
@@ -24,6 +24,8 @@ from ..utils.output import handle_output, console
 @click.option('--location', help='Location for search results')
 @click.option('--scrape', is_flag=True,
               help='Scrape the search results (returns full content)')
+@click.option('--no-links', is_flag=True,
+              help='Strip markdown links when scraping')
 @click.option('-f', '--format', 'formats', multiple=True,
               default=['markdown'],
               type=click.Choice(['markdown', 'html', 'links']),
@@ -39,6 +41,7 @@ def search(
     tbs: Optional[str],
     location: Optional[str],
     scrape: bool,
+    no_links: bool,
     formats: tuple,
     output: Optional[str],
     json_output: bool,
@@ -118,11 +121,11 @@ def search(
             # Prepare data for output
             output_data = {}
             if hasattr(result, 'web') and result.web:
-                output_data['web'] = [_format_result(r, scrape) for r in result.web]
+                output_data['web'] = [_format_result(r, scrape, no_links) for r in result.web]
             if hasattr(result, 'news') and result.news:
-                output_data['news'] = [_format_result(r, scrape) for r in result.news]
+                output_data['news'] = [_format_result(r, scrape, no_links) for r in result.news]
             if hasattr(result, 'images') and result.images:
-                output_data['images'] = [_format_result(r, scrape) for r in result.images]
+                output_data['images'] = [_format_result(r, scrape, no_links) for r in result.images]
 
             # Handle output
             if output or json_output:
@@ -189,7 +192,7 @@ def _display_search_results(result, include_content: bool):
         _print_results(result.images, "🖼️  Image Results")
 
 
-def _format_result(item, include_content: bool) -> dict:
+def _format_result(item, include_content: bool, no_links: bool = False) -> dict:
     """Format a search result item for JSON output"""
     result = {}
 
@@ -204,7 +207,10 @@ def _format_result(item, include_content: bool) -> dict:
     # Content fields (if scraped)
     if include_content:
         if hasattr(item, 'markdown'):
-            result['markdown'] = item.markdown
+            md = item.markdown
+            if no_links:
+                md = strip_links(md)
+            result['markdown'] = md
         if hasattr(item, 'html'):
             result['html'] = item.html
         if hasattr(item, 'links'):

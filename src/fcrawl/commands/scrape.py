@@ -7,7 +7,7 @@ from rich.console import Console
 from typing import List, Optional, Tuple
 
 from ..utils.config import get_firecrawl_client
-from ..utils.output import handle_output, console
+from ..utils.output import handle_output, console, strip_links
 
 
 # Article mode: aggressive filtering for clean article extraction
@@ -134,6 +134,8 @@ def format_with_metadata(result, content: str) -> str:
               help='Article mode: aggressive filtering for clean article extraction')
 @click.option('--raw', is_flag=True,
               help='Raw mode: disable all content filtering')
+@click.option('--no-links', is_flag=True,
+              help='Strip markdown links, keep display text')
 @click.option('--wait', type=int, help='Wait time in milliseconds before scraping')
 @click.option('--screenshot-full', is_flag=True, help='Take full page screenshot')
 def scrape(
@@ -147,6 +149,7 @@ def scrape(
     exclude_tags: Tuple[str, ...],
     article: bool,
     raw: bool,
+    no_links: bool,
     wait: Optional[int],
     screenshot_full: bool,
 ):
@@ -213,6 +216,9 @@ def scrape(
             # Article mode: apply post-processing cleanup
             if article:
                 content = clean_article_content(content)
+            # Strip links if requested
+            if no_links:
+                content = strip_links(content)
             # Prepend metadata header (like Jina) unless JSON output
             if not json_output:
                 content = format_with_metadata(result, content)
