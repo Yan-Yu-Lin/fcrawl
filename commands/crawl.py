@@ -3,7 +3,6 @@
 import click
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from rich.console import Console
-from rich.table import Table
 from typing import Optional, List
 
 from utils.config import get_firecrawl_client
@@ -81,34 +80,42 @@ def crawl(
             # Start the crawl - this blocks until complete with poll_interval
             result = client.crawl(url, **crawl_options)
 
-            # Update progress based on result
-            if hasattr(result, 'data') and result.data:
-                progress.update(task, completed=len(result.data))
-            else:
-                progress.update(task, completed=limit)
+            progress.stop()
+
+            # Helper to safely get metadata attributes
+            def get_meta(page, *attrs):
+                if not hasattr(page, 'metadata') or page.metadata is None:
+                    return None
+                meta = page.metadata
+                for attr in attrs:
+                    val = getattr(meta, attr, None)
+                    if val is not None:
+                        return val
+                return None
 
             # Process results
             if hasattr(result, 'data') and result.data:
                 console.print(f"[green]✓ Crawled {len(result.data)} pages successfully[/green]")
 
-                # Create summary table
+                # Display as clean list (no table)
                 if pretty and not output:
-                    table = Table(title=f"Crawl Results - {url}")
-                    table.add_column("Page", style="cyan", no_wrap=False)
-                    table.add_column("Title", style="magenta")
-                    table.add_column("Status", style="green")
+                    console.print(f"\n[bold]Crawl Results - {url}[/bold]", justify="center")
+                    console.print("─" * 60)
 
-                    for page in result.data[:10]:  # Show first 10 in table
-                        page_url = page.metadata.sourceURL if hasattr(page, 'metadata') else 'Unknown'
-                        page_title = page.metadata.title if hasattr(page, 'metadata') else 'No title'
-                        status = page.metadata.statusCode if hasattr(page, 'metadata') else 'N/A'
-                        table.add_row(
-                            page_url[:50] + '...' if len(page_url) > 50 else page_url,
-                            page_title[:30] + '...' if len(page_title) > 30 else page_title,
-                            str(status)
-                        )
+                    for i, page in enumerate(result.data[:10], 1):
+                        page_url = get_meta(page, 'sourceURL', 'url', 'source_url') or 'Unknown'
+                        page_title = get_meta(page, 'title') or 'No title'
+                        status = get_meta(page, 'statusCode', 'status_code') or ''
 
-                    console.print(table)
+                        console.print(f"[bold cyan]## {page_title}[/bold cyan]")
+                        console.print(f"[blue]{page_url}[/blue]")
+                        if status:
+                            console.print(f"[dim]Status: {status}[/dim]")
+                        console.print()
+
+                    console.print("─" * 60)
+                    if len(result.data) > 10:
+                        console.print(f"[dim]... and {len(result.data) - 10} more pages[/dim]")
 
                 # Prepare data for output
                 if json_output or output:

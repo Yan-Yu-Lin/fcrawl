@@ -3,7 +3,6 @@
 import click
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
-from rich.table import Table
 from typing import Optional
 
 from utils.config import get_firecrawl_client
@@ -57,45 +56,45 @@ def map_site(
             client = get_firecrawl_client()
             result = client.map(url, **map_options)
 
-            progress.update(task, completed=True)
+            progress.stop()
+
+            # Helper to extract URL from link object
+            def get_url(link):
+                if isinstance(link, dict):
+                    return link.get('url', str(link))
+                elif hasattr(link, 'url'):
+                    return link.url
+                else:
+                    return str(link)
 
             # Process results
             if hasattr(result, 'links') and result.links:
                 console.print(f"[green]✓ Found {len(result.links)} URLs[/green]")
 
                 if pretty and not output and not json_output:
-                    # Display as table
-                    table = Table(title=f"Site Map - {url}")
-                    table.add_column("#", style="dim", width=6)
-                    table.add_column("URL", style="cyan", no_wrap=False)
+                    # Display as clean list (no table)
+                    console.print(f"\n[bold]Site Map - {url}[/bold]", justify="center")
+                    console.print("─" * 60)
 
-                    for i, link in enumerate(result.links[:50], 1):  # Show first 50
-                        if isinstance(link, dict):
-                            url_str = link.get('url', str(link))
-                        else:
-                            url_str = str(link)
-                        table.add_row(str(i), url_str)
+                    for i, link in enumerate(result.links[:50], 1):
+                        url_str = get_url(link)
+                        console.print(f"[dim]{i:3}.[/dim] [cyan]{url_str}[/cyan]")
 
-                    console.print(table)
+                    console.print("─" * 60)
 
                     if len(result.links) > 50:
-                        console.print(f"\n[dim]... and {len(result.links) - 50} more URLs[/dim]")
+                        console.print(f"[dim]... and {len(result.links) - 50} more URLs[/dim]")
 
-                # Prepare data for output
-                links_data = []
-                for link in result.links:
-                    if isinstance(link, dict):
-                        links_data.append(link)
-                    else:
-                        links_data.append({'url': str(link)})
-
-                handle_output(
-                    links_data if json_output or output else result.links,
-                    output_file=output,
-                    json_output=json_output,
-                    pretty=pretty,
-                    format_type='links' if not json_output else 'json'
-                )
+                # Handle file/JSON output
+                if output or json_output:
+                    links_data = [{'url': get_url(link)} for link in result.links]
+                    handle_output(
+                        links_data,
+                        output_file=output,
+                        json_output=True,
+                        pretty=pretty,
+                        format_type='json'
+                    )
 
             else:
                 console.print("[yellow]No URLs found[/yellow]")
