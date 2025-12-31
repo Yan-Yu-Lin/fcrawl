@@ -293,9 +293,9 @@ def yt_channel(
 
             for video in result["videos"]:
                 views_str = f"{video['views']:,}" if video['views'] else "N/A"
-                # Make title clickable
+                # Make title clickable with light blue color
                 title = video['title'][:60] + ("..." if len(video['title']) > 60 else "")
-                clickable_title = f"[link={video['url']}]{title}[/link]"
+                clickable_title = f"[link={video['url']}][bright_cyan]{title}[/bright_cyan][/link]"
                 table.add_row(
                     str(video['index']),
                     video['duration_human'],
