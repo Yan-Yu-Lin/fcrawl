@@ -64,44 +64,40 @@ def scrape(
         try:
             client = get_firecrawl_client()
             result = client.scrape(url, **scrape_options)
-
-            progress.update(task, completed=True)
-
-            # Handle different format outputs
-            if len(formats) == 1:
-                # Single format - output directly
-                format_type = formats[0]
-                if format_type == 'markdown' and hasattr(result, 'markdown'):
-                    content = result.markdown
-                elif format_type == 'html' and hasattr(result, 'html'):
-                    content = result.html
-                elif format_type == 'links' and hasattr(result, 'links'):
-                    content = result.links
-                else:
-                    content = result
-            else:
-                # Multiple formats - create a dict
-                content = {}
-                if 'markdown' in formats and hasattr(result, 'markdown'):
-                    content['markdown'] = result.markdown
-                if 'html' in formats and hasattr(result, 'html'):
-                    content['html'] = result.html
-                if 'links' in formats and hasattr(result, 'links'):
-                    content['links'] = result.links
-                if hasattr(result, 'metadata'):
-                    content['metadata'] = result.metadata.__dict__ if hasattr(result.metadata, '__dict__') else result.metadata
-
-            # Output handling
-            handle_output(
-                content,
-                output_file=output,
-                copy=copy,
-                json_output=json_output,
-                pretty=pretty,
-                format_type=formats[0] if len(formats) == 1 else 'json'
-            )
+            progress.stop()
 
         except Exception as e:
             progress.stop()
             console.print(f"[red]Error: {e}[/red]")
             raise click.Abort()
+
+    # Handle output AFTER progress is done
+    if len(formats) == 1:
+        format_type = formats[0]
+        if format_type == 'markdown' and hasattr(result, 'markdown'):
+            content = result.markdown
+        elif format_type == 'html' and hasattr(result, 'html'):
+            content = result.html
+        elif format_type == 'links' and hasattr(result, 'links'):
+            content = result.links
+        else:
+            content = result
+    else:
+        content = {}
+        if 'markdown' in formats and hasattr(result, 'markdown'):
+            content['markdown'] = result.markdown
+        if 'html' in formats and hasattr(result, 'html'):
+            content['html'] = result.html
+        if 'links' in formats and hasattr(result, 'links'):
+            content['links'] = result.links
+        if hasattr(result, 'metadata'):
+            content['metadata'] = result.metadata.__dict__ if hasattr(result.metadata, '__dict__') else result.metadata
+
+    handle_output(
+        content,
+        output_file=output,
+        copy=copy,
+        json_output=json_output,
+        pretty=pretty,
+        format_type=formats[0] if len(formats) == 1 else 'json'
+    )

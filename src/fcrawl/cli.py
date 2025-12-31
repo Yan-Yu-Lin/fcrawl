@@ -49,25 +49,12 @@ def config():
     for key, value in config_data.items():
         console.print(f"  {key}: {value}")
 
-@cli.command()
-@click.argument('url')
-def quick(url):
-    """Quick scrape with default settings (markdown to stdout)"""
-    from .utils.output import display_content
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console
-    ) as progress:
-        task = progress.add_task(f"Scraping {url}...", total=None)
-
-        client = get_firecrawl_client()
-        result = client.scrape(url, formats=['markdown'])
-
-        progress.stop()
-
-    display_content(result.markdown, format_type='markdown')
+# REMOVED: quick is redundant - just use `fcrawl scrape URL`
+# @cli.command()
+# @click.argument('url')
+# def quick(url):
+#     """Quick scrape with default settings (markdown to stdout)"""
+#     ...
 
 if __name__ == '__main__':
     cli()
