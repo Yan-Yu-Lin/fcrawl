@@ -1,12 +1,100 @@
 """Scrape command for fcrawl"""
 
+import re
 import click
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from ..utils.config import get_firecrawl_client
 from ..utils.output import handle_output, console
+
+
+# Article mode: aggressive filtering for clean article extraction
+ARTICLE_INCLUDE_TAGS = [
+    "article",
+    "main",
+    ".post-content",
+    ".post-body",
+    ".entry-content",
+    ".article-content",
+    ".article-body",
+    ".content-body",
+    "#content",
+    "#article",
+    "[role='main']",
+]
+
+ARTICLE_EXCLUDE_TAGS = [
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    ".sidebar",
+    ".share",
+    ".social",
+    ".social-share",
+    ".share-buttons",
+    ".popup",
+    ".modal",
+    ".newsletter",
+    ".subscribe",
+    ".comments",
+    ".comment-section",
+    "#comments",
+    ".related",
+    ".related-posts",
+    ".recommended",
+    ".advertisement",
+    ".ads",
+    ".ad",
+    ".cookie",
+    ".banner",
+    ".promo",
+    ".cta",
+]
+
+
+def clean_article_content(content: str) -> str:
+    """Post-process markdown to remove common noise patterns"""
+    lines = content.split('\n')
+    cleaned_lines = []
+
+    # Patterns to skip
+    skip_patterns = [
+        r'^Close$',  # Popup close buttons
+        r'^\s*\*\s*\[\s*\]\(https?://(www\.)?(twitter|facebook|linkedin|reddit|pinterest|x\.com)',  # Empty share links
+        r'^\s*\*\s*\[.*\]\(https?://(www\.)?(twitter\.com/share|facebook\.com/sharer|linkedin\.com/share|reddit\.com/submit)',  # Share links with text
+        r'^Share (on|this|article)',  # Share text
+        r'^(Tweet|Pin|Share|Follow us)',  # Social CTAs
+        r'^\s*US\s*$',  # Random country codes from popups
+        r'^Start Now$',  # CTA buttons
+        r'^Subscribe',  # Newsletter prompts
+        r'^Sign up',  # Sign up prompts
+        r'^\s*$',  # Empty lines at start (will be handled by consecutive empty check)
+    ]
+
+    skip_regex = [re.compile(p, re.IGNORECASE) for p in skip_patterns]
+
+    # Track consecutive empty lines
+    prev_empty = False
+
+    for line in lines:
+        # Check if line matches any skip pattern
+        should_skip = any(r.search(line) for r in skip_regex)
+
+        if should_skip:
+            continue
+
+        # Collapse multiple empty lines
+        is_empty = line.strip() == ''
+        if is_empty and prev_empty:
+            continue
+
+        cleaned_lines.append(line)
+        prev_empty = is_empty
+
+    return '\n'.join(cleaned_lines)
 
 
 def format_with_metadata(result, content: str) -> str:
@@ -38,10 +126,16 @@ def format_with_metadata(result, content: str) -> str:
 @click.option('--copy', is_flag=True, help='Copy to clipboard')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 @click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
-@click.option('--selector', help='CSS selector to extract specific content')
+@click.option('-i', '--include', 'include_tags', multiple=True,
+              help='CSS selectors to include (can specify multiple)')
+@click.option('-e', '--exclude', 'exclude_tags', multiple=True,
+              help='CSS selectors to exclude (can specify multiple)')
+@click.option('--article', is_flag=True,
+              help='Article mode: aggressive filtering for clean article extraction')
+@click.option('--raw', is_flag=True,
+              help='Raw mode: disable all content filtering')
 @click.option('--wait', type=int, help='Wait time in milliseconds before scraping')
 @click.option('--screenshot-full', is_flag=True, help='Take full page screenshot')
-@click.option('--no-cache', is_flag=True, help='Bypass cache')
 def scrape(
     url: str,
     formats: List[str],
@@ -49,26 +143,46 @@ def scrape(
     copy: bool,
     json_output: bool,
     pretty: bool,
-    selector: Optional[str],
+    include_tags: Tuple[str, ...],
+    exclude_tags: Tuple[str, ...],
+    article: bool,
+    raw: bool,
     wait: Optional[int],
     screenshot_full: bool,
-    no_cache: bool
 ):
     """Scrape a single URL and extract content
 
     Examples:
         fcrawl scrape https://example.com
+        fcrawl scrape https://example.com --article
+        fcrawl scrape https://example.com -i ".content" -e ".sidebar"
+        fcrawl scrape https://example.com --raw
         fcrawl scrape https://example.com -f markdown -f links
-        fcrawl scrape https://example.com -o output.md
-        fcrawl scrape https://example.com --copy
+        fcrawl scrape https://example.com -o output.md --copy
     """
     # Prepare scrape options
     scrape_options = {
         'formats': list(formats)
     }
 
+    # Handle content filtering modes
+    if raw:
+        # Disable all filtering
+        scrape_options['only_main_content'] = False
+    elif article:
+        # Aggressive article mode
+        scrape_options['include_tags'] = list(ARTICLE_INCLUDE_TAGS)
+        scrape_options['exclude_tags'] = list(ARTICLE_EXCLUDE_TAGS)
+        scrape_options['only_main_content'] = False  # We handle filtering ourselves
+    else:
+        # Custom include/exclude tags
+        if include_tags:
+            scrape_options['include_tags'] = list(include_tags)
+        if exclude_tags:
+            scrape_options['exclude_tags'] = list(exclude_tags)
+
     if wait:
-        scrape_options['wait'] = wait
+        scrape_options['wait_for'] = wait
 
     if screenshot_full and 'screenshot' in formats:
         scrape_options['screenshot'] = {'fullPage': True}
@@ -96,6 +210,9 @@ def scrape(
         format_type = formats[0]
         if format_type == 'markdown' and hasattr(result, 'markdown'):
             content = result.markdown
+            # Article mode: apply post-processing cleanup
+            if article:
+                content = clean_article_content(content)
             # Prepend metadata header (like Jina) unless JSON output
             if not json_output:
                 content = format_with_metadata(result, content)
