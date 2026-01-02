@@ -135,8 +135,8 @@ def x():
 @x.command(name='search')
 @click.argument('query')
 @click.option('--limit', '-l', type=int, default=20, help='Maximum number of results')
-@click.option('--sort', type=click.Choice(['top', 'latest', 'photos', 'videos']), default='latest',
-              help='Sort order (default: latest)')
+@click.option('--sort', type=click.Choice(['top', 'latest', 'photos', 'videos']), default='top',
+              help='Sort order (default: top)')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def x_search(query: str, limit: int, sort: str, output: Optional[str], json_output: bool):
@@ -208,15 +208,20 @@ def x_search(query: str, limit: int, sort: str, output: Optional[str], json_outp
 
 @x.command(name='tweet')
 @click.argument('id_or_url')
+@click.option('--thread', is_flag=True, help='Fetch full thread (author replies)')
+@click.option('--with-replies', is_flag=True, help='Include replies from other users (use with --thread)')
+@click.option('--reply-limit', type=int, default=30, help='Max replies to fetch (default: 30)')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-def x_tweet(id_or_url: str, output: Optional[str], json_output: bool):
+def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, output: Optional[str], json_output: bool):
     """Fetch a single tweet by ID or URL.
 
     \b
     Examples:
         fcrawl x tweet 1234567890
         fcrawl x tweet https://x.com/user/status/1234567890
+        fcrawl x tweet 1234567890 --thread  # Fetch full thread
+        fcrawl x tweet 1234567890 --thread --with-replies  # Thread + other replies
     """
     try:
         tweet_id = extract_tweet_id(id_or_url)
@@ -228,16 +233,144 @@ def x_tweet(id_or_url: str, output: Optional[str], json_output: bool):
         api = get_x_api()
         return await api.tweet_details(tweet_id)
 
+    def _is_reply_to_others(tweet, author_username: str) -> bool:
+        """Check if tweet is an @reply to someone other than self."""
+        content = tweet.rawContent.strip()
+        # If starts with @mention that isn't the author, it's a reply to others
+        if content.startswith('@'):
+            # Extract the first @mention
+            import re
+            match = re.match(r'@(\w+)', content)
+            if match:
+                mentioned = match.group(1).lower()
+                # If mentioning someone other than self, it's a reply to others
+                if mentioned != author_username.lower():
+                    return True
+        return False
+
+    async def _fetch_thread(original_tweet, with_replies: bool = False, reply_limit: int = 30):
+        """Fetch full thread by walking the inReplyToTweetId chain + fetching replies."""
+        api = get_x_api()
+        author_id = original_tweet.user.id
+        author_username = original_tweet.user.username
+        conv_id = original_tweet.conversationId if hasattr(original_tweet, 'conversationId') else original_tweet.id
+
+        seen_ids = set()
+        thread_tweets = {}
+        other_replies = {}  # Collect replies from other users
+
+        async def add_tweet(t):
+            """Add tweet to thread if it's from the author and not a reply to others."""
+            if t.id in seen_ids:
+                return
+            if t.user.id != author_id:
+                return
+            if _is_reply_to_others(t, author_username):
+                return
+            seen_ids.add(t.id)
+            thread_tweets[t.id] = t
+
+        async def walk_chain_backwards(start_id):
+            """Walk backwards via inReplyToTweetId to find all parent tweets."""
+            current_id = start_id
+            while current_id and current_id not in seen_ids:
+                t = await api.tweet_details(current_id)
+                if not t:
+                    break
+                if t.user.id != author_id:
+                    break  # Hit a tweet from another user, stop
+                await add_tweet(t)
+                current_id = t.inReplyToTweetId
+
+        async def walk_chain_forwards(start_id):
+            """Walk forwards by fetching replies and following author's replies."""
+            to_check = [start_id]
+            checked = set()
+            while to_check:
+                current_id = to_check.pop(0)
+                if current_id in checked:
+                    continue
+                checked.add(current_id)
+
+                async with aclosing(api.tweet_replies(current_id, limit=50)) as gen:
+                    async for reply in gen:
+                        if reply.id in seen_ids:
+                            continue
+                        if reply.user.id == author_id:
+                            await add_tweet(reply)
+                            to_check.append(reply.id)
+                        elif with_replies and len(other_replies) < reply_limit:
+                            # Collect replies from other users
+                            seen_ids.add(reply.id)
+                            other_replies[reply.id] = reply
+
+        # Step 1: Add original tweet
+        await add_tweet(original_tweet)
+
+        # Step 2: Get tweets from user timeline with same conversationId
+        async with aclosing(api.user_tweets_and_replies(author_id, limit=200)) as gen:
+            async for t in gen:
+                if hasattr(t, 'conversationId') and t.conversationId == conv_id:
+                    await add_tweet(t)
+
+        # Step 3: Walk backwards from each found tweet to fill gaps
+        for tid in list(thread_tweets.keys()):
+            t = thread_tweets[tid]
+            if t.inReplyToTweetId:
+                await walk_chain_backwards(t.inReplyToTweetId)
+
+        # Step 4: Walk forwards from original to find any replies we missed
+        await walk_chain_forwards(original_tweet.id)
+
+        # If we didn't find anything, fall back to just the original
+        if not thread_tweets:
+            thread_tweets[original_tweet.id] = original_tweet
+
+        # Sort thread by tweet ID (chronological order)
+        thread_result = list(thread_tweets.values())
+        thread_result.sort(key=lambda t: t.id)
+
+        # Sort other replies by likes (popularity)
+        replies_result = list(other_replies.values())
+        replies_result.sort(key=lambda t: t.likeCount, reverse=True)
+
+        return thread_result, replies_result
+
+    # Validate: --with-replies requires --thread
+    if with_replies and not thread:
+        console.print("[yellow]--with-replies requires --thread flag[/yellow]")
+        with_replies = False
+
+    replies = []  # Other users' replies
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console
     ) as progress:
-        task = progress.add_task(f"Fetching tweet {tweet_id}...", total=None)
+        desc = f"Fetching thread {tweet_id}..." if thread else f"Fetching tweet {tweet_id}..."
+        if with_replies:
+            desc = f"Fetching thread + replies {tweet_id}..."
+        task = progress.add_task(desc, total=None)
 
         try:
             tweet = asyncio.run(_fetch())
-            progress.stop()
+            if not tweet:
+                progress.stop()
+                console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
+                return
+
+            if thread:
+                tweets, replies = asyncio.run(_fetch_thread(tweet, with_replies, reply_limit))
+                progress.stop()
+                msg = f"[green]Found {len(tweets)} tweets in thread[/green]"
+                if replies:
+                    msg += f" [dim]+ {len(replies)} replies[/dim]"
+                console.print(msg)
+            else:
+                tweets = [tweet]
+                progress.stop()
+
         except NoAccountError:
             progress.stop()
             console.print("[red]No X accounts configured.[/red]")
@@ -248,18 +381,35 @@ def x_tweet(id_or_url: str, output: Optional[str], json_output: bool):
             console.print(f"[red]Error: {e}[/red]")
             raise click.Abort()
 
-    if not tweet:
-        console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
-        return
-
     if json_output or output:
-        data = tweet_to_dict(tweet)
+        if thread and with_replies:
+            # Structured output with thread and replies
+            data = {
+                "thread": [tweet_to_dict(t) for t in tweets],
+                "replies": [tweet_to_dict(t) for t in replies],
+            }
+        elif thread:
+            data = [tweet_to_dict(t) for t in tweets]
+        else:
+            data = tweet_to_dict(tweets[0])
         if output:
             save_to_file(json.dumps(data, indent=2), output, 'json')
         if json_output and not output:
             console.print_json(json.dumps(data, indent=2))
     else:
-        display_tweet(tweet)
+        # Display thread
+        for t in tweets:
+            display_tweet(t)
+        if thread and len(tweets) > 1:
+            console.print(f"\n[dim]Thread: {len(tweets)} tweets from @{tweets[0].user.username}[/dim]")
+
+        # Display replies if any
+        if replies:
+            console.print("\n" + "─" * 60)
+            console.print(f"[bold]Replies[/bold] [dim]({len(replies)} sorted by likes)[/dim]")
+            console.print("─" * 60)
+            for t in replies:
+                display_tweet(t)
 
 
 @x.command(name='user')
@@ -549,3 +699,43 @@ def x_accounts_login(username: Optional[str]):
     console.print(f"  Total: {result['total']}")
     console.print(f"  Success: {result['success']}")
     console.print(f"  Failed: {result['failed']}")
+
+
+@x_accounts.command(name='add-tokens')
+@click.option('--ct0', required=True, help='ct0 cookie value from browser')
+@click.option('--auth', 'auth_token', required=True, help='auth_token cookie value from browser')
+@click.option('--name', 'username', default=None, help='Account name (auto-generated if not provided)')
+def x_accounts_add_tokens(ct0: str, auth_token: str, username: Optional[str]):
+    """Add account using browser tokens (ct0 + auth_token).
+
+    \b
+    Extract ct0 and auth_token cookies from your browser after logging into X/Twitter,
+    then use this command to add the account without needing username/password.
+
+    \b
+    Examples:
+        fcrawl x accounts add-tokens --ct0 "abc123..." --auth "xyz789..."
+        fcrawl x accounts add-tokens --ct0 "abc123..." --auth "xyz789..." --name myaccount
+    """
+    import hashlib
+
+    # Auto-generate username if not provided
+    if not username:
+        hash_input = f"{ct0[:16]}{auth_token[:16]}"
+        short_hash = hashlib.md5(hash_input.encode()).hexdigest()[:8]
+        username = f"token_{short_hash}"
+
+    async def _add():
+        pool = get_x_pool()
+        return await pool.add_account_from_tokens(username, ct0, auth_token)
+
+    try:
+        success = asyncio.run(_add())
+        if success:
+            console.print(f"[green]Account '{username}' added successfully[/green]")
+            console.print("  Status: active, logged_in")
+        else:
+            console.print(f"[yellow]Account '{username}' already exists[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise click.Abort()

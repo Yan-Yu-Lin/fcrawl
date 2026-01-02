@@ -111,6 +111,46 @@ class AccountsPool:
         await self.save(account)
         logger.info(f"Account {username} added successfully (active={account.active})")
 
+    async def add_account_from_tokens(
+        self,
+        username: str,
+        ct0: str,
+        auth_token: str,
+        user_agent: str | None = None,
+    ):
+        """Add account using pre-authenticated browser tokens (ct0 + auth_token)."""
+        from .account import TOKEN
+
+        qs = "SELECT * FROM accounts WHERE username = :username"
+        rs = await fetchone(self._db_file, qs, {"username": username})
+        if rs:
+            logger.warning(f"Account {username} already exists")
+            return False
+
+        cookies = {"ct0": ct0, "auth_token": auth_token}
+        headers = {
+            "authorization": TOKEN,
+            "x-csrf-token": ct0,
+            "x-twitter-auth-type": "OAuth2Session",
+        }
+
+        account = Account(
+            username=username,
+            password="token_auth",
+            email="token@auth",
+            email_password="token_auth",
+            user_agent=user_agent or UserAgent().safari,
+            active=True,
+            locks={},
+            stats={},
+            headers=headers,
+            cookies=cookies,
+        )
+
+        await self.save(account)
+        logger.info(f"Account {username} added from tokens (active=True)")
+        return True
+
     async def delete_accounts(self, usernames: str | list[str]):
         usernames = usernames if isinstance(usernames, list) else [usernames]
         usernames = list(set(usernames))
