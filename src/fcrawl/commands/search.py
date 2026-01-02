@@ -36,6 +36,7 @@ from ..utils.cache import cache_key, read_cache, write_cache, search_result_to_d
 @click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
 @click.option('--no-cache', 'no_cache', is_flag=True, help='Bypass cache, force fresh fetch')
 @click.option('--cache-only', 'cache_only', is_flag=True, help='Only read from cache, no API call')
+@click.option('--debug', is_flag=True, help='Show engine status and result sources')
 def search(
     query: str,
     sources: tuple,
@@ -51,6 +52,7 @@ def search(
     pretty: bool,
     no_cache: bool,
     cache_only: bool,
+    debug: bool,
 ):
     """Search the web and optionally scrape results
 
@@ -155,9 +157,13 @@ def search(
 
     console.print(f"[green]✓ Found {total_results} results[/green]")
 
+    # Display debug info if requested
+    if debug:
+        _display_debug_info(result)
+
     # Display results based on output mode
     if pretty and not output and not json_output:
-        _display_search_results(result, scrape)
+        _display_search_results(result, scrape, debug)
 
     # Prepare data for output
     output_data = {}
@@ -184,7 +190,40 @@ def search(
                 print(r.get('url', ''))
 
 
-def _display_search_results(result, include_content: bool):
+def _display_debug_info(result):
+    """Display engine status and statistics"""
+    from collections import Counter
+
+    console.print("\n[bold yellow]═══ DEBUG: Engine Status ═══[/bold yellow]")
+
+    # Show unresponsive engines
+    unresponsive = getattr(result, 'unresponsive_engines', None)
+    if unresponsive:
+        console.print("[red]Unresponsive engines:[/red]")
+        for engine_info in unresponsive:
+            if isinstance(engine_info, (list, tuple)) and len(engine_info) >= 2:
+                engine, reason = engine_info[0], engine_info[1]
+                console.print(f"  [red]✗[/red] {engine}: {reason}")
+    else:
+        console.print("[green]All engines responding[/green]")
+
+    # Count results by engine
+    engine_counts = Counter()
+    if hasattr(result, 'web') and result.web:
+        for item in result.web:
+            engine = getattr(item, 'engine', 'unknown')
+            if engine:
+                engine_counts[engine] += 1
+
+    if engine_counts:
+        console.print("\n[green]Results by engine:[/green]")
+        for engine, count in engine_counts.most_common():
+            console.print(f"  [green]✓[/green] {engine}: {count} results")
+
+    console.print("[yellow]════════════════════════════[/yellow]\n")
+
+
+def _display_search_results(result, include_content: bool, show_engines: bool = False):
     """Display search results in clean text format"""
 
     def _print_results(items, title_emoji: str):
@@ -198,8 +237,16 @@ def _display_search_results(result, include_content: bool):
             url = getattr(item, 'url', '')
             description = getattr(item, 'description', '')
 
-            # Title
-            console.print(f"[bold cyan]## {title}[/bold cyan]")
+            # Title with engine tag if debug mode
+            if show_engines:
+                engines = getattr(item, 'engines', None)
+                if engines:
+                    engines_str = ', '.join(engines)
+                    console.print(f"[dim]({engines_str})[/dim] [bold cyan]## {title}[/bold cyan]")
+                else:
+                    console.print(f"[bold cyan]## {title}[/bold cyan]")
+            else:
+                console.print(f"[bold cyan]## {title}[/bold cyan]")
             # URL
             console.print(f"[blue]{url}[/blue]")
             # Description

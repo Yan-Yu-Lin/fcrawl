@@ -14,6 +14,7 @@ from .commands.map import map_site
 from .commands.extract import extract
 from .commands.search import search
 from .commands.gsearch import gsearch
+from .commands.csearch import csearch
 from .commands.yt_transcript import yt_transcript
 from .commands.yt_channel import yt_channel
 from .commands.x import x
@@ -59,6 +60,7 @@ cli.add_command(map_site, name='map')
 cli.add_command(extract)
 cli.add_command(search)
 cli.add_command(gsearch)
+cli.add_command(csearch)
 cli.add_command(yt_transcript)
 cli.add_command(yt_channel)
 cli.add_command(x)
