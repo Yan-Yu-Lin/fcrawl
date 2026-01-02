@@ -308,7 +308,8 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
         await add_tweet(original_tweet)
 
         # Step 2: Get tweets from user timeline with same conversationId
-        async with aclosing(api.user_tweets_and_replies(author_id, limit=200)) as gen:
+        # Lower limit since old threads won't be found anyway, forwards walking handles it
+        async with aclosing(api.user_tweets_and_replies(author_id, limit=50)) as gen:
             async for t in gen:
                 if hasattr(t, 'conversationId') and t.conversationId == conv_id:
                     await add_tweet(t)
@@ -320,7 +321,9 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
                 await walk_chain_backwards(t.inReplyToTweetId)
 
         # Step 4: Walk forwards from original to find any replies we missed
-        await walk_chain_forwards(original_tweet.id)
+        # Only do this if we need replies from others, or if timeline didn't find the thread
+        if with_replies or len(thread_tweets) <= 1:
+            await walk_chain_forwards(original_tweet.id)
 
         # If we didn't find anything, fall back to just the original
         if not thread_tweets:
