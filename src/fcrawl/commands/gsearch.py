@@ -77,14 +77,15 @@ def _extract_results_from_page(page) -> list[dict]:
     """Extract search results from current page"""
     results = []
 
-    # Google's result structure: div.yuRUbf contains each result
-    result_elements = page.locator("div.yuRUbf").all()
+    # Google's result structure: div[data-snf='x5WNvb'] contains title/URL
+    # Description is in the following sibling element
+    result_containers = page.locator("div[data-snf='x5WNvb']").all()
 
-    # Fallback to div.tF2Cxc if yuRUbf not found
-    if not result_elements:
-        result_elements = page.locator("div.tF2Cxc").all()
+    # Fallback to div.yuRUbf if data-snf not found
+    if not result_containers:
+        result_containers = page.locator("div.yuRUbf").all()
 
-    for elem in result_elements:
+    for elem in result_containers:
         try:
             # Title (h3 inside the result)
             title_elem = elem.locator("h3").first
@@ -94,20 +95,21 @@ def _extract_results_from_page(page) -> list[dict]:
             link_elem = elem.locator("a").first
             url = link_elem.get_attribute("href") if link_elem.count() > 0 else ""
 
-            # Description/snippet - look in parent or sibling elements
+            # Description/snippet - in the following sibling element
             description = ""
-            parent = elem.locator("xpath=..").first
-            if parent.count() > 0:
-                for desc_selector in [
-                    "div.VwiC3b",
-                    "div[data-sncf]",
-                    "span.st",
-                    "div[style*='line-clamp']"
-                ]:
-                    desc_elem = parent.locator(desc_selector).first
+            sibling = elem.locator("xpath=following-sibling::*[1]")
+            if sibling.count() > 0:
+                desc_elem = sibling.locator("div.VwiC3b").first
+                if desc_elem.count() > 0:
+                    description = desc_elem.text_content() or ""
+
+            # Fallback: try inside parent container
+            if not description:
+                parent = elem.locator("xpath=..").first
+                if parent.count() > 0:
+                    desc_elem = parent.locator("div.VwiC3b").first
                     if desc_elem.count() > 0:
                         description = desc_elem.text_content() or ""
-                        break
 
             # Only add if we have a valid URL
             if url and url.startswith("http"):
