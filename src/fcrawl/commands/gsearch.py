@@ -73,11 +73,63 @@ def _get_os_name() -> str:
         return "linux"
 
 
+def _extract_results_from_page(page) -> list[dict]:
+    """Extract search results from current page"""
+    results = []
+
+    # Google's result structure: div.yuRUbf contains each result
+    result_elements = page.locator("div.yuRUbf").all()
+
+    # Fallback to div.tF2Cxc if yuRUbf not found
+    if not result_elements:
+        result_elements = page.locator("div.tF2Cxc").all()
+
+    for elem in result_elements:
+        try:
+            # Title (h3 inside the result)
+            title_elem = elem.locator("h3").first
+            title = title_elem.text_content() if title_elem.count() > 0 else ""
+
+            # URL (first anchor link)
+            link_elem = elem.locator("a").first
+            url = link_elem.get_attribute("href") if link_elem.count() > 0 else ""
+
+            # Description/snippet - look in parent or sibling elements
+            description = ""
+            parent = elem.locator("xpath=..").first
+            if parent.count() > 0:
+                for desc_selector in [
+                    "div.VwiC3b",
+                    "div[data-sncf]",
+                    "span.st",
+                    "div[style*='line-clamp']"
+                ]:
+                    desc_elem = parent.locator(desc_selector).first
+                    if desc_elem.count() > 0:
+                        description = desc_elem.text_content() or ""
+                        break
+
+            # Only add if we have a valid URL
+            if url and url.startswith("http"):
+                results.append({
+                    "title": title.strip() if title else "",
+                    "url": url,
+                    "description": description.strip() if description else ""
+                })
+        except Exception:
+            continue
+
+    return results
+
+
 def _google_search(query: str, limit: int, headless: bool, locale: Optional[str] = None) -> list[dict]:
-    """Perform Google search using Camoufox"""
+    """Perform Google search using Camoufox with pagination support"""
     from camoufox.sync_api import Camoufox
 
     results = []
+    seen_urls = set()  # Avoid duplicates across pages
+    results_per_page = 10
+    max_pages = (limit // results_per_page) + 1
 
     # Build Camoufox options
     camoufox_opts = {
@@ -93,87 +145,69 @@ def _google_search(query: str, limit: int, headless: bool, locale: Optional[str]
     with Camoufox(**camoufox_opts) as browser:
         page = browser.new_page()
 
-        # Build Google search URL
-        search_url = f"https://www.google.com/search?q={quote_plus(query)}&num={limit + 5}"
+        # Build base Google search URL
+        base_url = f"https://www.google.com/search?q={quote_plus(query)}"
 
         # Add locale parameters to URL (hl=language, gl=country)
-        # This is what actually affects Google's results, more than browser locale
         if locale:
             parts = locale.split("-")
             lang = parts[0]  # e.g., "ja" from "ja-JP"
-            search_url += f"&hl={lang}"
+            base_url += f"&hl={lang}"
             if len(parts) > 1:
                 country = parts[1]  # e.g., "JP" from "ja-JP"
-                search_url += f"&gl={country}"
+                base_url += f"&gl={country}"
 
-        page.goto(search_url, wait_until="domcontentloaded")
+        # Paginate through results
+        for page_num in range(max_pages):
+            if len(results) >= limit:
+                break
 
-        # Small random delay to appear human
-        time.sleep(random.uniform(0.5, 1.5))
+            # Build URL with pagination (start=0, 10, 20, ...)
+            start = page_num * results_per_page
+            search_url = f"{base_url}&start={start}"
 
-        # Handle cookie consent popup (EU/various regions)
-        try:
-            # Try different consent button selectors
-            for selector in [
-                "button:has-text('Accept all')",
-                "button:has-text('Accept')",
-                "button:has-text('I agree')",
-                "[aria-label='Accept all']",
-            ]:
-                consent = page.locator(selector).first
-                if consent.is_visible(timeout=1000):
-                    consent.click()
-                    time.sleep(0.5)
-                    break
-        except Exception:
-            pass  # No consent popup or already dismissed
+            page.goto(search_url, wait_until="domcontentloaded")
 
-        # Extract search results
-        # Google's result structure: div.tF2Cxc contains each result
-        # Alternative: look for links with h3 children (more reliable)
-        result_elements = page.locator("div.yuRUbf").all()
+            # Small random delay to appear human
+            time.sleep(random.uniform(0.5, 1.5))
 
-        # Fallback to div.tF2Cxc if yuRUbf not found
-        if not result_elements:
-            result_elements = page.locator("div.tF2Cxc").all()
-
-        for elem in result_elements[:limit]:
-            try:
-                # Title (h3 inside the result)
-                title_elem = elem.locator("h3").first
-                title = title_elem.text_content() if title_elem.count() > 0 else ""
-
-                # URL (first anchor link)
-                link_elem = elem.locator("a").first
-                url = link_elem.get_attribute("href") if link_elem.count() > 0 else ""
-
-                # Description/snippet - look in parent or sibling elements
-                description = ""
-                # Try to get description from the parent container
-                parent = elem.locator("xpath=..").first
-                if parent.count() > 0:
-                    for desc_selector in [
-                        "div.VwiC3b",
-                        "div[data-sncf]",
-                        "span.st",
-                        "div[style*='line-clamp']"
+            # Handle cookie consent popup (first page only typically)
+            if page_num == 0:
+                try:
+                    for selector in [
+                        "button:has-text('Accept all')",
+                        "button:has-text('Accept')",
+                        "button:has-text('I agree')",
+                        "[aria-label='Accept all']",
                     ]:
-                        desc_elem = parent.locator(desc_selector).first
-                        if desc_elem.count() > 0:
-                            description = desc_elem.text_content() or ""
+                        consent = page.locator(selector).first
+                        if consent.is_visible(timeout=1000):
+                            consent.click()
+                            time.sleep(0.5)
                             break
+                except Exception:
+                    pass
 
-                # Only add if we have a valid URL
-                if url and url.startswith("http"):
-                    results.append({
-                        "title": title.strip() if title else "",
-                        "url": url,
-                        "description": description.strip() if description else ""
-                    })
-            except Exception:
-                continue
+            # Extract results from this page
+            page_results = _extract_results_from_page(page)
 
-    return results
+            # No more results available
+            if not page_results:
+                break
+
+            # Add unique results
+            for r in page_results:
+                if r["url"] not in seen_urls:
+                    seen_urls.add(r["url"])
+                    results.append(r)
+                    if len(results) >= limit:
+                        break
+
+            # Small delay between pages to appear human
+            if page_num < max_pages - 1 and len(results) < limit:
+                time.sleep(random.uniform(1.0, 2.0))
+
+    return results[:limit]
 
 
 @click.command()
