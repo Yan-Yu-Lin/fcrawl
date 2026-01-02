@@ -1,10 +1,12 @@
 """Bing search engine implementation"""
 
 import base64
+import random
 import time
+from typing import Optional
 from urllib.parse import quote_plus, urlparse, parse_qs
 
-from .base import SearchEngine, SearchResult
+from .base import SearchEngine, SearchResult, EngineStatus
 
 
 class BingEngine(SearchEngine):
@@ -19,21 +21,198 @@ class BingEngine(SearchEngine):
     pagination_start = 1
     pagination_increment = 10
 
+    def __init__(self):
+        super().__init__()
+        # Generate cvid once per session for consistency
+        self._cvid = self._generate_cvid()
+
+    @staticmethod
+    def _generate_cvid() -> str:
+        """Generate a Bing conversation ID (32-char hex string)"""
+        return ''.join(f'{random.randint(0, 255):02X}' for _ in range(16))
+
     def build_search_url(self, query: str, page: int = 0) -> str:
-        """Build Bing search URL"""
+        """Build Bing search URL with proper parameters to avoid anti-bot measures"""
         # Bing uses first=1, 11, 21, etc.
         first = (page * self.pagination_increment) + 1
-        return f"{self.base_url}?q={quote_plus(query)}&first={first}"
+
+        # Build URL with all necessary Bing parameters
+        # cvid = conversation ID, required for proper session handling
+        # pq = partial query (same as q for full queries)
+        # filters=rcrse:"1" prevents autocorrection that causes wrong results
+        # FORM=PERE is the standard form code for web search
+        params = [
+            f"q={quote_plus(query)}",
+            f"pq={quote_plus(query)}",
+            f"cvid={self._cvid}",
+            f"first={first}",
+            'filters=rcrse%3A"1"',  # Disable autocorrect (URL-encoded)
+            "FORM=PERE",
+            "ghc=1",
+            "lq=0",
+            "qs=n",
+            "sk=",
+            "sp=-1",
+        ]
+        return f"{self.base_url}?{'&'.join(params)}"
 
     def _add_locale_params(self, url: str, locale: str) -> str:
-        """Add Bing locale parameters (setlang and mkt)"""
+        """Add Bing locale parameters (setlang, mkt, cc)"""
         parts = locale.split("-")
         lang = parts[0]
+
+        # Handle special language codes
+        # Bing doesn't work well with 'zh-hans', convert to 'zh-cn'
+        if lang == "zh" and len(parts) > 1:
+            region = parts[1].lower()
+            if region in ("hans", "cn"):
+                lang = "zh-cn"
+            elif region in ("hant", "tw", "hk"):
+                lang = "zh-tw"
+
         url += f"&setlang={lang}"
         if len(parts) > 1:
             # Market code like en-US, ja-JP
             url += f"&mkt={locale}"
+            # Also add country code for additional locale specificity
+            url += f"&cc={parts[1]}"
         return url
+
+    def search(self, query: str, limit: int, headless: bool = True,
+               locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Perform Bing search with proper locale/cookie handling.
+
+        Bing uses IP geolocation to determine search results language. To override this,
+        we need to set cookies AND headers AND URL parameters together.
+        """
+        from camoufox.sync_api import Camoufox
+
+        start_time = time.time()
+        results = []
+        seen_urls = set()
+        max_pages = (limit // self.results_per_page) + 1
+
+        # Generate new cvid for this search session
+        self._cvid = self._generate_cvid()
+
+        # Parse locale for Camoufox config
+        lang_code = "en"
+        region_code = "US"
+        if locale:
+            parts = locale.split("-")
+            lang_code = parts[0]
+            if len(parts) > 1:
+                region_code = parts[1]
+
+        # Build comprehensive Camoufox options for locale spoofing
+        camoufox_opts = {
+            "headless": headless,
+            "humanize": True,
+            "block_images": True,
+            "i_know_what_im_doing": True,
+            "os": self.os_name,
+            "locale": locale or "en-US",
+            "config": {
+                # Set Accept-Language header explicitly
+                "headers.Accept-Language": f"{locale or 'en-US'},{lang_code};q=0.9,en;q=0.8",
+                # Set browser locale
+                "locale:language": lang_code,
+                "locale:region": region_code,
+            }
+        }
+
+        try:
+            with Camoufox(**camoufox_opts) as browser:
+                page = browser.new_page()
+
+                # Set Bing-specific cookies before navigation
+                # These cookies help tell Bing what language/market to use
+                bing_cookies = [
+                    {
+                        "name": "_EDGE_S",
+                        "value": f"mkt={locale or 'en-US'}&ui={lang_code}",
+                        "domain": ".bing.com",
+                        "path": "/"
+                    },
+                    {
+                        "name": "SRCHHPGUSR",
+                        "value": f"SRCHLANG={lang_code}&IG={self._cvid}&SRCHMKT={locale or 'en-US'}",
+                        "domain": ".bing.com",
+                        "path": "/"
+                    },
+                    {
+                        "name": "_EDGE_CD",
+                        "value": f"m={locale or 'en-US'}&u={lang_code}",
+                        "domain": ".bing.com",
+                        "path": "/"
+                    }
+                ]
+                page.context.add_cookies(bing_cookies)
+
+                # Visit Bing homepage first to initialize session/cookies properly
+                # This mimics real user behavior and helps with locale detection
+                page.goto("https://www.bing.com/", wait_until="domcontentloaded")
+                time.sleep(random.uniform(0.5, 1.0))
+                self.handle_consent(page)
+
+                for page_num in range(max_pages):
+                    if len(results) >= limit:
+                        break
+
+                    # Build URL and navigate
+                    search_url = self.build_search_url(query, page_num)
+                    if locale:
+                        search_url = self._add_locale_params(search_url, locale)
+
+                    page.goto(search_url, wait_until="domcontentloaded")
+
+                    # Small random delay to appear human
+                    time.sleep(random.uniform(0.5, 1.5))
+
+                    # Handle consent popup on first page
+                    if page_num == 0:
+                        self.handle_consent(page)
+
+                    # Extract results
+                    page_results = self.extract_results(page)
+
+                    # No more results
+                    if not page_results:
+                        break
+
+                    # Add unique results with position
+                    for r in page_results:
+                        if r.url not in seen_urls:
+                            seen_urls.add(r.url)
+                            r.position = len(results) + 1
+                            results.append(r)
+                            if len(results) >= limit:
+                                break
+
+                    # Delay between pages
+                    if page_num < max_pages - 1 and len(results) < limit:
+                        time.sleep(random.uniform(1.0, 2.0))
+
+            elapsed = time.time() - start_time
+            status = EngineStatus(
+                engine=self.name,
+                success=True,
+                result_count=len(results),
+                elapsed_time=elapsed
+            )
+            return results[:limit], status
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            status = EngineStatus(
+                engine=self.name,
+                success=False,
+                result_count=0,
+                elapsed_time=elapsed,
+                error=str(e)
+            )
+            return [], status
 
     def handle_consent(self, page) -> None:
         """Handle Bing cookie consent popup"""
