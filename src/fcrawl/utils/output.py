@@ -16,11 +16,14 @@ console = Console()
 
 
 def extract_markdown_links(content: str) -> List[str]:
-    """Extract URLs from markdown links [text](url) - handles escaped brackets too"""
+    """Extract URLs from markdown links [text](url).
+
+    Handles both regular [text](url) and escaped \\[text\\](url) formats.
+    """
     if not content:
         return []
-    # Simple pattern: extract URL from ](url) - works for both [text](url) and \[text\](url)
-    pattern = r'\]\((https?://[^)\s]+)\)'
+    # Match [text](url) - validates full link structure, handles escaped brackets
+    pattern = r'\\?\[[^\]]+\\?\]\((https?://[^)\s]+)\)'
     urls = re.findall(pattern, content)
     # Deduplicate while preserving order
     seen = set()
