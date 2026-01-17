@@ -167,12 +167,20 @@ class BingEngine(SearchEngine):
 
                     page.goto(search_url, wait_until="domcontentloaded")
 
-                    # Small random delay to appear human
-                    time.sleep(random.uniform(0.5, 1.5))
-
                     # Handle consent popup on first page
                     if page_num == 0:
                         self.handle_consent(page)
+
+                    # Wait for search results to render (Bing uses JS)
+                    # This is critical - domcontentloaded fires before JS finishes
+                    try:
+                        page.wait_for_selector("li.b_algo", timeout=5000)
+                    except Exception:
+                        # Results might not exist, or different page structure
+                        pass
+
+                    # Small random delay to appear human
+                    time.sleep(random.uniform(0.3, 0.8))
 
                     # Extract results
                     page_results = self.extract_results(page)

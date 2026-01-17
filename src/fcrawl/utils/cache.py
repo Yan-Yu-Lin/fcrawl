@@ -92,7 +92,8 @@ def search_result_to_dict(result) -> dict:
 
     def item_to_dict(item):
         d = {}
-        for attr in ['url', 'title', 'description', 'markdown', 'html', 'links']:
+        for attr in ['url', 'title', 'description', 'markdown', 'html', 'links',
+                     'engine', 'engines', 'score']:
             if hasattr(item, attr):
                 d[attr] = getattr(item, attr)
         if hasattr(item, 'metadata') and item.metadata:

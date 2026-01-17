@@ -10,7 +10,7 @@ dependencies = [
     "camoufox[geoip]>=0.4.11",
     "click>=8.3.1",
     "fake-useragent>=2.0.0",
-    "firecrawl-py>=4.12.0",
+    "firecrawl-py @ file:///Users/linyanyu/20-29-Development/23-tools/23.02-external-tools/firecrawl/apps/python-sdk",
     "httpx>=0.28.1",
     "loguru>=0.7.3",
     "orjson>=3.11.5",
@@ -27,6 +27,9 @@ fcrawl = "fcrawl:cli"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fcrawl"]
