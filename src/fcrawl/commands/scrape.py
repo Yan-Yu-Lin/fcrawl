@@ -7,7 +7,7 @@ from rich.console import Console
 from typing import List, Optional, Tuple
 
 from ..utils.config import get_firecrawl_client
-from ..utils.output import handle_output, console, strip_links
+from ..utils.output import handle_output, console, strip_links, extract_markdown_links
 from ..utils.cache import cache_key, read_cache, write_cache, result_to_dict, CachedResult
 
 
@@ -169,8 +169,12 @@ def scrape(
         fcrawl scrape https://example.com -o output.md --copy
     """
     # Prepare scrape options
+    api_formats = list(formats)
+    # Always request markdown when links is requested (for markdown link extraction)
+    if 'links' in api_formats and 'markdown' not in api_formats:
+        api_formats.append('markdown')
     scrape_options = {
-        'formats': list(formats)
+        'formats': api_formats
     }
 
     # Handle content filtering modes
@@ -259,8 +263,17 @@ def scrape(
                 content = format_with_metadata(result, content)
         elif format_type == 'html' and hasattr(result, 'html'):
             content = result.html
-        elif format_type == 'links' and hasattr(result, 'links'):
-            content = result.links
+        elif format_type == 'links':
+            # Start with HTML-extracted links from API
+            html_links = result.links if hasattr(result, 'links') and result.links else []
+
+            # Also extract markdown links from content if available
+            md_content = result.markdown if hasattr(result, 'markdown') else None
+            md_links = extract_markdown_links(md_content) if md_content else []
+
+            # Merge and deduplicate (HTML links first, then markdown)
+            seen = set(html_links)
+            content = list(html_links) + [u for u in md_links if u not in seen]
         else:
             content = result
     else:
@@ -269,8 +282,13 @@ def scrape(
             content['markdown'] = result.markdown
         if 'html' in formats and hasattr(result, 'html'):
             content['html'] = result.html
-        if 'links' in formats and hasattr(result, 'links'):
-            content['links'] = result.links
+        if 'links' in formats:
+            # Merge HTML and markdown links
+            html_links = result.links if hasattr(result, 'links') and result.links else []
+            md_content = result.markdown if hasattr(result, 'markdown') else None
+            md_links = extract_markdown_links(md_content) if md_content else []
+            seen = set(html_links)
+            content['links'] = list(html_links) + [u for u in md_links if u not in seen]
         if hasattr(result, 'metadata'):
             content['metadata'] = result.metadata.__dict__ if hasattr(result.metadata, '__dict__') else result.metadata
 

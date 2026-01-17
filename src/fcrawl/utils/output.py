@@ -15,6 +15,18 @@ import pyperclip
 console = Console()
 
 
+def extract_markdown_links(content: str) -> List[str]:
+    """Extract URLs from markdown links [text](url) - handles escaped brackets too"""
+    if not content:
+        return []
+    # Simple pattern: extract URL from ](url) - works for both [text](url) and \[text\](url)
+    pattern = r'\]\((https?://[^)\s]+)\)'
+    urls = re.findall(pattern, content)
+    # Deduplicate while preserving order
+    seen = set()
+    return [u for u in urls if not (u in seen or seen.add(u))]
+
+
 def strip_links(content: str) -> str:
     """Remove markdown links, preserving display text. Images get [Image: alt] marker."""
     # Nested image links: [![alt](img)](url) → [Image: alt]
