@@ -77,10 +77,114 @@ class SearchEngine(ABC):
         """Handle cookie consent popup if present. Override in subclass."""
         pass
 
+    def get_context_options(self, locale: Optional[str] = None) -> dict:
+        """
+        Return Playwright context options (locale, headers).
+        Override in subclass for engine-specific settings.
+        """
+        if not locale:
+            return {}
+        # Basic locale support
+        lang_code = locale.split("-")[0]
+        return {
+            "locale": locale,
+            "extra_http_headers": {
+                "Accept-Language": f"{locale},{lang_code};q=0.9,en;q=0.8"
+            }
+        }
+
+    def setup_context(self, context, locale: Optional[str] = None) -> None:
+        """
+        Set up cookies/state on the context.
+        Override in subclass for engine-specific cookies.
+        """
+        pass
+
+    def search_with_page(self, page, query: str, limit: int,
+                         locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Search using a provided page (context already set up).
+        This is the core search logic without browser creation.
+
+        Args:
+            page: Playwright page object (already created from a context)
+            query: Search query
+            limit: Maximum number of results
+            locale: Locale for regional results
+
+        Returns:
+            Tuple of (results list, engine status)
+        """
+        start_time = time.time()
+        results = []
+        seen_urls = set()
+        max_pages = (limit // self.results_per_page) + 1
+
+        try:
+            for page_num in range(max_pages):
+                if len(results) >= limit:
+                    break
+
+                # Build URL and navigate
+                search_url = self.build_search_url(query, page_num)
+                if locale:
+                    search_url = self._add_locale_params(search_url, locale)
+
+                page.goto(search_url, wait_until="domcontentloaded")
+
+                # Small random delay to appear human
+                time.sleep(random.uniform(0.5, 1.5))
+
+                # Handle consent popup on first page
+                if page_num == 0:
+                    self.handle_consent(page)
+
+                # Extract results
+                page_results = self.extract_results(page)
+
+                # No more results
+                if not page_results:
+                    break
+
+                # Add unique results with position
+                for r in page_results:
+                    if r.url not in seen_urls:
+                        seen_urls.add(r.url)
+                        # Update position to be global across pages
+                        r.position = len(results) + 1
+                        results.append(r)
+                        if len(results) >= limit:
+                            break
+
+                # Delay between pages
+                if page_num < max_pages - 1 and len(results) < limit:
+                    time.sleep(random.uniform(1.0, 2.0))
+
+            elapsed = time.time() - start_time
+            status = EngineStatus(
+                engine=self.name,
+                success=True,
+                result_count=len(results),
+                elapsed_time=elapsed
+            )
+            return results[:limit], status
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            status = EngineStatus(
+                engine=self.name,
+                success=False,
+                result_count=0,
+                elapsed_time=elapsed,
+                error=str(e)
+            )
+            return [], status
+
     def search(self, query: str, limit: int, headless: bool = True,
                locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
         """
         Perform search and return results with status.
+        Creates its own browser - use search_with_page() for shared browser.
 
         Args:
             query: Search query
@@ -94,9 +198,6 @@ class SearchEngine(ABC):
         from camoufox.sync_api import Camoufox
 
         start_time = time.time()
-        results = []
-        seen_urls = set()
-        max_pages = (limit // self.results_per_page) + 1
 
         # Build Camoufox options
         camoufox_opts = {
@@ -111,55 +212,22 @@ class SearchEngine(ABC):
 
         try:
             with Camoufox(**camoufox_opts) as browser:
-                page = browser.new_page()
+                # Create context with engine-specific options
+                context_opts = self.get_context_options(locale)
+                context = browser.new_context(**context_opts)
 
-                for page_num in range(max_pages):
-                    if len(results) >= limit:
-                        break
+                # Engine-specific cookie/state setup
+                self.setup_context(context, locale)
 
-                    # Build URL and navigate
-                    search_url = self.build_search_url(query, page_num)
-                    if locale:
-                        search_url = self._add_locale_params(search_url, locale)
+                # Create page and run search
+                page = context.new_page()
+                results, status = self.search_with_page(page, query, limit, locale)
 
-                    page.goto(search_url, wait_until="domcontentloaded")
+                # Adjust timing to include browser setup
+                elapsed = time.time() - start_time
+                status.elapsed_time = elapsed
 
-                    # Small random delay to appear human
-                    time.sleep(random.uniform(0.5, 1.5))
-
-                    # Handle consent popup on first page
-                    if page_num == 0:
-                        self.handle_consent(page)
-
-                    # Extract results
-                    page_results = self.extract_results(page)
-
-                    # No more results
-                    if not page_results:
-                        break
-
-                    # Add unique results with position
-                    for r in page_results:
-                        if r.url not in seen_urls:
-                            seen_urls.add(r.url)
-                            # Update position to be global across pages
-                            r.position = len(results) + 1
-                            results.append(r)
-                            if len(results) >= limit:
-                                break
-
-                    # Delay between pages
-                    if page_num < max_pages - 1 and len(results) < limit:
-                        time.sleep(random.uniform(1.0, 2.0))
-
-            elapsed = time.time() - start_time
-            status = EngineStatus(
-                engine=self.name,
-                success=True,
-                result_count=len(results),
-                elapsed_time=elapsed
-            )
-            return results[:limit], status
+                return results, status
 
         except Exception as e:
             elapsed = time.time() - start_time

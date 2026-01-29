@@ -1,6 +1,7 @@
 """Brave search engine implementation"""
 
 import time
+from typing import Optional
 from urllib.parse import quote_plus
 
 from .base import SearchEngine, SearchResult
@@ -30,6 +31,23 @@ class BraveEngine(SearchEngine):
             country = parts[1].lower()
             url += f"&country={country}"
         return url
+
+    def get_context_options(self, locale: Optional[str] = None) -> dict:
+        """Return context options with Brave-specific headers"""
+        lang_code = "en"
+        if locale:
+            lang_code = locale.split("-")[0]
+        return {
+            "locale": locale or "en-US",
+            "extra_http_headers": {
+                "Accept-Language": f"{locale or 'en-US'},{lang_code};q=0.9,en;q=0.8"
+            }
+        }
+
+    def setup_context(self, context, locale: Optional[str] = None) -> None:
+        """Brave doesn't require special cookies for locale handling"""
+        # Brave Search respects Accept-Language header, no cookies needed
+        pass
 
     def handle_consent(self, page) -> None:
         """Handle Brave consent/popup if any"""

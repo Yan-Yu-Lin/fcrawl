@@ -35,22 +35,114 @@ class GoogleEngine(SearchEngine):
             url += f"&gl={country}"
         return url
 
-    def search(self, query: str, limit: int, headless: bool = True,
-               locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
-        """
-        Perform Google search with proper locale handling.
+    def get_context_options(self, locale: Optional[str] = None) -> dict:
+        """Return context options with Google-specific headers"""
+        lang_code = "en"
+        if locale:
+            lang_code = locale.split("-")[0]
+        return {
+            "locale": locale or "en-US",
+            "extra_http_headers": {
+                "Accept-Language": f"{locale or 'en-US'},{lang_code};q=0.9,en;q=0.8"
+            }
+        }
 
-        Google uses IP geolocation for search results. To override this,
-        we visit google.com first and set proper headers/cookies.
-        """
-        from camoufox.sync_api import Camoufox
+    def setup_context(self, context, locale: Optional[str] = None) -> None:
+        """Set Google-specific cookies for locale preference"""
+        lang_code = "en"
+        region_code = "US"
+        if locale:
+            parts = locale.split("-")
+            lang_code = parts[0]
+            if len(parts) > 1:
+                region_code = parts[1]
 
+        google_cookies = [
+            {
+                "name": "PREF",
+                "value": f"hl={lang_code}&gl={region_code}",
+                "domain": ".google.com",
+                "path": "/"
+            },
+            {
+                "name": "NID",
+                "value": f"hl={lang_code}",
+                "domain": ".google.com",
+                "path": "/"
+            }
+        ]
+        context.add_cookies(google_cookies)
+
+    def search_with_page(self, page, query: str, limit: int,
+                         locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Search using a provided page (context already set up).
+        Google-specific: visits homepage first to initialize session.
+        """
         start_time = time.time()
         results = []
         seen_urls = set()
         max_pages = (limit // self.results_per_page) + 1
 
-        # Parse locale
+        try:
+            # Visit Google homepage first to initialize session
+            page.goto("https://www.google.com/", wait_until="domcontentloaded")
+            time.sleep(random.uniform(0.3, 0.7))
+            self.handle_consent(page)
+
+            for page_num in range(max_pages):
+                if len(results) >= limit:
+                    break
+
+                search_url = self.build_search_url(query, page_num)
+                if locale:
+                    search_url = self._add_locale_params(search_url, locale)
+
+                page.goto(search_url, wait_until="domcontentloaded")
+                time.sleep(random.uniform(0.5, 1.5))
+
+                if page_num == 0:
+                    self.handle_consent(page)
+
+                page_results = self.extract_results(page)
+                if not page_results:
+                    break
+
+                for r in page_results:
+                    if r.url not in seen_urls:
+                        seen_urls.add(r.url)
+                        r.position = len(results) + 1
+                        results.append(r)
+                        if len(results) >= limit:
+                            break
+
+                if page_num < max_pages - 1 and len(results) < limit:
+                    time.sleep(random.uniform(1.0, 2.0))
+
+            elapsed = time.time() - start_time
+            return results[:limit], EngineStatus(
+                engine=self.name, success=True,
+                result_count=len(results), elapsed_time=elapsed
+            )
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            return [], EngineStatus(
+                engine=self.name, success=False,
+                result_count=0, elapsed_time=elapsed, error=str(e)
+            )
+
+    def search(self, query: str, limit: int, headless: bool = True,
+               locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Perform Google search with proper locale handling.
+        Creates its own browser - use search_with_page() for shared browser.
+        """
+        from camoufox.sync_api import Camoufox
+
+        start_time = time.time()
+
+        # Parse locale for Camoufox config
         lang_code = "en"
         region_code = "US"
         if locale:
@@ -76,64 +168,22 @@ class GoogleEngine(SearchEngine):
 
         try:
             with Camoufox(**camoufox_opts) as browser:
-                page = browser.new_page()
+                # Create context with Google-specific options
+                context_opts = self.get_context_options(locale)
+                context = browser.new_context(**context_opts)
 
-                # Set Google cookies for locale preference
-                google_cookies = [
-                    {
-                        "name": "PREF",
-                        "value": f"hl={lang_code}&gl={region_code}",
-                        "domain": ".google.com",
-                        "path": "/"
-                    },
-                    {
-                        "name": "NID",
-                        "value": f"hl={lang_code}",
-                        "domain": ".google.com",
-                        "path": "/"
-                    }
-                ]
-                page.context.add_cookies(google_cookies)
+                # Set up Google cookies
+                self.setup_context(context, locale)
 
-                # Visit Google homepage first to initialize session
-                page.goto("https://www.google.com/", wait_until="domcontentloaded")
-                time.sleep(random.uniform(0.3, 0.7))
-                self.handle_consent(page)
+                # Create page and run search
+                page = context.new_page()
+                results, status = self.search_with_page(page, query, limit, locale)
 
-                for page_num in range(max_pages):
-                    if len(results) >= limit:
-                        break
+                # Adjust timing to include browser setup
+                elapsed = time.time() - start_time
+                status.elapsed_time = elapsed
 
-                    search_url = self.build_search_url(query, page_num)
-                    if locale:
-                        search_url = self._add_locale_params(search_url, locale)
-
-                    page.goto(search_url, wait_until="domcontentloaded")
-                    time.sleep(random.uniform(0.5, 1.5))
-
-                    if page_num == 0:
-                        self.handle_consent(page)
-
-                    page_results = self.extract_results(page)
-                    if not page_results:
-                        break
-
-                    for r in page_results:
-                        if r.url not in seen_urls:
-                            seen_urls.add(r.url)
-                            r.position = len(results) + 1
-                            results.append(r)
-                            if len(results) >= limit:
-                                break
-
-                    if page_num < max_pages - 1 and len(results) < limit:
-                        time.sleep(random.uniform(1.0, 2.0))
-
-            elapsed = time.time() - start_time
-            return results[:limit], EngineStatus(
-                engine=self.name, success=True,
-                result_count=len(results), elapsed_time=elapsed
-            )
+                return results, status
 
         except Exception as e:
             elapsed = time.time() - start_time

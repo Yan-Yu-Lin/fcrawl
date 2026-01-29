@@ -51,11 +51,43 @@ def _search_single_engine(
     headless: bool,
     locale: Optional[str]
 ) -> tuple[str, list[SearchResult], EngineStatus]:
-    """Search a single engine and return results with status"""
+    """Search a single engine and return results with status (creates own browser)"""
     engine_class = get_engine(engine_name)
     engine = engine_class()
     results, status = engine.search(query, limit, headless=headless, locale=locale)
     return engine_name, results, status
+
+
+def _search_with_shared_browser(
+    browser,
+    engine_name: str,
+    query: str,
+    limit: int,
+    locale: Optional[str]
+) -> tuple[str, list[SearchResult], EngineStatus]:
+    """
+    Search using a shared browser with engine-specific context.
+    Each call creates its own BrowserContext (isolated cookies, storage).
+    Must be called from the same thread that created the browser.
+    """
+    engine_class = get_engine(engine_name)
+    engine = engine_class()
+
+    # Create context with engine-specific options (locale, headers)
+    context_opts = engine.get_context_options(locale)
+    context = browser.new_context(**context_opts)
+
+    try:
+        # Set up engine-specific cookies
+        engine.setup_context(context, locale)
+
+        # Create page and run search
+        page = context.new_page()
+        results, status = engine.search_with_page(page, query, limit, locale)
+        return engine_name, results, status
+    finally:
+        # Always close the context to free resources
+        context.close()
 
 
 def _display_debug_info(statuses: list[EngineStatus], stats: dict, raw_count: int):
@@ -249,34 +281,48 @@ def csearch(
             )
 
             if parallel and len(engines_to_use) > 1:
-                # Parallel execution using ThreadPoolExecutor
-                with ThreadPoolExecutor(max_workers=len(engines_to_use)) as executor:
-                    futures = {
-                        executor.submit(
-                            _search_single_engine,
-                            eng,
-                            query,
-                            per_engine_limit,
-                            not headful,
-                            locale
-                        ): eng
-                        for eng in engines_to_use
-                    }
+                # Shared browser execution: ONE browser, sequential contexts
+                # This saves ~67% of browser startup overhead vs spawning 3 separate browsers
+                # Each engine gets its own isolated context (cookies, storage)
+                from camoufox.sync_api import Camoufox
 
-                    for future in as_completed(futures):
-                        engine_name = futures[future]
-                        try:
-                            _, results, status = future.result()
-                            all_results.extend(results)
-                            all_statuses.append(status)
+                # Get OS name from first engine
+                first_engine = get_engine(engines_to_use[0])()
+                os_name = first_engine.os_name
+
+                shared_opts = {
+                    "headless": not headful,
+                    "humanize": True,
+                    "block_images": True,
+                    "i_know_what_im_doing": True,
+                    "os": os_name,
+                }
+
+                try:
+                    with Camoufox(**shared_opts) as browser:
+                        for eng in engines_to_use:
+                            try:
+                                _, results, status = _search_with_shared_browser(
+                                    browser, eng, query, per_engine_limit, locale
+                                )
+                                all_results.extend(results)
+                                all_statuses.append(status)
+                            except Exception as e:
+                                all_statuses.append(EngineStatus(
+                                    engine=eng,
+                                    success=False,
+                                    error=str(e)
+                                ))
                             progress.advance(main_task)
-                        except Exception as e:
-                            all_statuses.append(EngineStatus(
-                                engine=engine_name,
-                                success=False,
-                                error=str(e)
-                            ))
-                            progress.advance(main_task)
+                except Exception as e:
+                    # Browser creation failed
+                    for eng in engines_to_use:
+                        all_statuses.append(EngineStatus(
+                            engine=eng,
+                            success=False,
+                            error=f"Browser creation failed: {str(e)}"
+                        ))
+                        progress.advance(main_task)
             else:
                 # Sequential execution
                 for eng in engines_to_use:
