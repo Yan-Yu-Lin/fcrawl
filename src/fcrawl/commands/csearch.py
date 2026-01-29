@@ -281,9 +281,9 @@ def csearch(
             )
 
             if parallel and len(engines_to_use) > 1:
-                # Shared browser execution: ONE browser, sequential contexts
-                # This saves ~67% of browser startup overhead vs spawning 3 separate browsers
-                # Each engine gets its own isolated context (cookies, storage)
+                # Shared browser with PARALLEL context execution
+                # ONE browser, multiple contexts running simultaneously via ThreadPoolExecutor
+                # Each thread creates its own isolated context (thread-safe)
                 from camoufox.sync_api import Camoufox
 
                 # Get OS name from first engine
@@ -300,20 +300,33 @@ def csearch(
 
                 try:
                     with Camoufox(**shared_opts) as browser:
-                        for eng in engines_to_use:
-                            try:
-                                _, results, status = _search_with_shared_browser(
-                                    browser, eng, query, per_engine_limit, locale
-                                )
-                                all_results.extend(results)
-                                all_statuses.append(status)
-                            except Exception as e:
-                                all_statuses.append(EngineStatus(
-                                    engine=eng,
-                                    success=False,
-                                    error=str(e)
-                                ))
-                            progress.advance(main_task)
+                        # Parallel execution: each thread gets its own context
+                        with ThreadPoolExecutor(max_workers=len(engines_to_use)) as executor:
+                            futures = {
+                                executor.submit(
+                                    _search_with_shared_browser,
+                                    browser,
+                                    eng,
+                                    query,
+                                    per_engine_limit,
+                                    locale
+                                ): eng
+                                for eng in engines_to_use
+                            }
+
+                            for future in as_completed(futures):
+                                engine_name = futures[future]
+                                try:
+                                    _, results, status = future.result()
+                                    all_results.extend(results)
+                                    all_statuses.append(status)
+                                except Exception as e:
+                                    all_statuses.append(EngineStatus(
+                                        engine=engine_name,
+                                        success=False,
+                                        error=str(e)
+                                    ))
+                                progress.advance(main_task)
                 except Exception as e:
                     # Browser creation failed
                     for eng in engines_to_use:
