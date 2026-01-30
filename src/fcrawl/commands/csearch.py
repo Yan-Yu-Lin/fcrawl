@@ -1,10 +1,10 @@
 """Multi-engine search command using Camoufox (anti-detection browser)"""
 
+import asyncio
 import click
 import json
 import time
 from typing import Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
 from rich.table import Table
@@ -58,7 +58,7 @@ def _search_single_engine(
     return engine_name, results, status
 
 
-def _search_with_shared_browser(
+async def _search_engine_async(
     browser,
     engine_name: str,
     query: str,
@@ -66,28 +66,90 @@ def _search_with_shared_browser(
     locale: Optional[str]
 ) -> tuple[str, list[SearchResult], EngineStatus]:
     """
-    Search using a shared browser with engine-specific context.
+    Async search using a shared browser with engine-specific context.
     Each call creates its own BrowserContext (isolated cookies, storage).
-    Must be called from the same thread that created the browser.
+    Thread-safe when used with asyncio.gather on a single browser.
     """
     engine_class = get_engine(engine_name)
     engine = engine_class()
 
     # Create context with engine-specific options (locale, headers)
     context_opts = engine.get_context_options(locale)
-    context = browser.new_context(**context_opts)
+    context = await browser.new_context(**context_opts)
 
     try:
-        # Set up engine-specific cookies
-        engine.setup_context(context, locale)
+        # Set up engine-specific cookies (async version)
+        await engine.setup_context_async(context, locale)
 
-        # Create page and run search
-        page = context.new_page()
-        results, status = engine.search_with_page(page, query, limit, locale)
+        # Create page and run search (async version)
+        page = await context.new_page()
+        results, status = await engine.search_with_page_async(page, query, limit, locale)
         return engine_name, results, status
     finally:
         # Always close the context to free resources
-        context.close()
+        await context.close()
+
+
+async def _search_all_engines_async(
+    engines_to_use: list[str],
+    query: str,
+    per_engine_limit: int,
+    headful: bool,
+    locale: Optional[str],
+    progress_callback=None
+) -> list[tuple[str, list[SearchResult], EngineStatus]]:
+    """
+    Search all engines concurrently using asyncio.gather.
+    Uses a single shared browser with multiple contexts (thread-safe pattern).
+    """
+    from camoufox.async_api import AsyncCamoufox
+
+    # Get OS name from first engine for browser spoofing
+    first_engine = get_engine(engines_to_use[0])()
+    os_name = first_engine.os_name
+
+    browser_opts = {
+        "headless": not headful,
+        "humanize": True,
+        "block_images": True,
+        "i_know_what_im_doing": True,
+        "os": os_name,
+    }
+
+    results = []
+
+    async with AsyncCamoufox(**browser_opts) as browser:
+        # Create tasks for all engines
+        tasks = [
+            _search_engine_async(browser, eng, query, per_engine_limit, locale)
+            for eng in engines_to_use
+        ]
+
+        # Run all searches concurrently
+        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Process results, handling any exceptions
+        for i, result in enumerate(task_results):
+            engine_name = engines_to_use[i]
+            if isinstance(result, Exception):
+                # Convert exception to failed status
+                results.append((
+                    engine_name,
+                    [],
+                    EngineStatus(
+                        engine=engine_name,
+                        success=False,
+                        error=str(result)
+                    )
+                ))
+            else:
+                results.append(result)
+
+            # Call progress callback if provided
+            if progress_callback:
+                progress_callback()
+
+    return results
 
 
 def _display_debug_info(statuses: list[EngineStatus], stats: dict, raw_count: int):
@@ -281,59 +343,33 @@ def csearch(
             )
 
             if parallel and len(engines_to_use) > 1:
-                # Shared browser with PARALLEL context execution
-                # ONE browser, multiple contexts running simultaneously via ThreadPoolExecutor
-                # Each thread creates its own isolated context (thread-safe)
-                from camoufox.sync_api import Camoufox
-
-                # Get OS name from first engine
-                first_engine = get_engine(engines_to_use[0])()
-                os_name = first_engine.os_name
-
-                shared_opts = {
-                    "headless": not headful,
-                    "humanize": True,
-                    "block_images": True,
-                    "i_know_what_im_doing": True,
-                    "os": os_name,
-                }
-
+                # Async parallel execution using asyncio.gather
+                # ONE browser, multiple contexts running concurrently (thread-safe)
                 try:
-                    with Camoufox(**shared_opts) as browser:
-                        # Parallel execution: each thread gets its own context
-                        with ThreadPoolExecutor(max_workers=len(engines_to_use)) as executor:
-                            futures = {
-                                executor.submit(
-                                    _search_with_shared_browser,
-                                    browser,
-                                    eng,
-                                    query,
-                                    per_engine_limit,
-                                    locale
-                                ): eng
-                                for eng in engines_to_use
-                            }
+                    # Run async search in event loop
+                    async_results = asyncio.run(
+                        _search_all_engines_async(
+                            engines_to_use,
+                            query,
+                            per_engine_limit,
+                            headful,
+                            locale,
+                            progress_callback=lambda: progress.advance(main_task)
+                        )
+                    )
 
-                            for future in as_completed(futures):
-                                engine_name = futures[future]
-                                try:
-                                    _, results, status = future.result()
-                                    all_results.extend(results)
-                                    all_statuses.append(status)
-                                except Exception as e:
-                                    all_statuses.append(EngineStatus(
-                                        engine=engine_name,
-                                        success=False,
-                                        error=str(e)
-                                    ))
-                                progress.advance(main_task)
+                    # Process results
+                    for engine_name, results, status in async_results:
+                        all_results.extend(results)
+                        all_statuses.append(status)
+
                 except Exception as e:
-                    # Browser creation failed
+                    # Browser creation or overall async execution failed
                     for eng in engines_to_use:
                         all_statuses.append(EngineStatus(
                             engine=eng,
                             success=False,
-                            error=f"Browser creation failed: {str(e)}"
+                            error=f"Async execution failed: {str(e)}"
                         ))
                         progress.advance(main_task)
             else:
