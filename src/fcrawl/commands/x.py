@@ -11,9 +11,11 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from ..utils.article_parser import parse_article_from_response
 from ..utils.output import handle_output, save_to_file
 from ..utils.x_client import get_x_api, get_x_db_path, get_x_pool
 from ..vendors.twscrape import NoAccountError, Tweet, User
+from ..vendors.twscrape.models import parse_tweet
 
 console = Console()
 
@@ -57,6 +59,19 @@ def display_tweet(tweet: Tweet):
     if tweet.viewCount:
         stats.append(f"[dim]Views[/dim] {format_number(tweet.viewCount)}")
     console.print("  ".join(stats))
+
+
+def display_article(article):
+    """Display article content in markdown format."""
+    console.print()
+    console.print("─" * 60)
+    console.print(f"[bold magenta]📄 Article: {article.title}[/bold magenta]")
+    console.print("─" * 60)
+    console.print()
+    console.print(article.to_markdown())
+    console.print()
+    if article.cover_image_url:
+        console.print(f"[dim]Cover image: {article.cover_image_url}[/dim]")
 
 
 def display_user(user: User):
@@ -231,7 +246,14 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
 
     async def _fetch():
         api = get_x_api()
-        return await api.tweet_details(tweet_id)
+        # Use raw to get both tweet and article data
+        rep = await api.tweet_details_raw(tweet_id)
+        if not rep:
+            return None, None
+        response_json = rep.json()
+        tweet = parse_tweet(rep, tweet_id)
+        article = parse_article_from_response(response_json)
+        return tweet, article
 
     def _is_reply_to_others(tweet, author_username: str) -> bool:
         """Check if tweet is an @reply to someone other than self."""
@@ -345,6 +367,7 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
         with_replies = False
 
     replies = []  # Other users' replies
+    article = None  # Article if present
 
     with Progress(
         SpinnerColumn(),
@@ -357,7 +380,7 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
         task = progress.add_task(desc, total=None)
 
         try:
-            tweet = asyncio.run(_fetch())
+            tweet, article = asyncio.run(_fetch())
             if not tweet:
                 progress.stop()
                 console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
@@ -391,10 +414,16 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
                 "thread": [tweet_to_dict(t) for t in tweets],
                 "replies": [tweet_to_dict(t) for t in replies],
             }
+            if article:
+                data["article"] = article.to_dict()
         elif thread:
             data = [tweet_to_dict(t) for t in tweets]
+            if article:
+                data = {"thread": data, "article": article.to_dict()}
         else:
             data = tweet_to_dict(tweets[0])
+            if article:
+                data = {"tweet": data, "article": article.to_dict()}
         if output:
             save_to_file(json.dumps(data, indent=2), output, 'json')
         if json_output and not output:
@@ -406,6 +435,10 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
         if thread and len(tweets) > 1:
             console.print(f"\n[dim]Thread: {len(tweets)} tweets from @{tweets[0].user.username}[/dim]")
 
+        # Display article if present
+        if article:
+            display_article(article)
+
         # Display replies if any
         if replies:
             console.print("\n" + "─" * 60)
@@ -413,6 +446,122 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
             console.print("─" * 60)
             for t in replies:
                 display_tweet(t)
+
+
+def extract_article_tweet_id(id_or_url: str) -> int:
+    """Extract tweet ID from tweet URL, article URL, or direct ID.
+
+    Handles:
+    - https://x.com/user/status/123456789
+    - https://x.com/i/article/123456789
+    - 123456789 (direct ID)
+    """
+    # Handle article URLs like https://x.com/i/article/123456789
+    article_match = re.search(r'/i/article/(\d+)', id_or_url)
+    if article_match:
+        # Article ID - need to find parent tweet
+        # For now, return the article ID and handle specially
+        return int(article_match.group(1))
+
+    # Handle tweet URLs
+    status_match = re.search(r'/status/(\d+)', id_or_url)
+    if status_match:
+        return int(status_match.group(1))
+
+    # Assume it's a direct ID
+    return int(id_or_url)
+
+
+@x.command(name='article')
+@click.argument('id_or_url')
+@click.option('-o', '--output', help='Save output to file')
+@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
+@click.option('--raw', is_flag=True, help='Output raw Draft.js blocks instead of markdown')
+def x_article(id_or_url: str, output: Optional[str], json_output: bool, raw: bool):
+    """Fetch an X article by tweet ID/URL.
+
+    \b
+    Examples:
+        fcrawl x article https://x.com/user/status/123
+        fcrawl x article 123456789
+        fcrawl x article 123 -o article.md
+        fcrawl x article 123 --json
+    """
+    from ..utils.article_parser import parse_article_from_response
+
+    try:
+        tweet_id = extract_article_tweet_id(id_or_url)
+    except ValueError:
+        console.print(f"[red]Invalid tweet/article ID or URL: {id_or_url}[/red]")
+        raise click.Abort()
+
+    async def _fetch():
+        api = get_x_api()
+        return await api.tweet_with_article_raw(tweet_id)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console
+    ) as progress:
+        task = progress.add_task(f"Fetching article from tweet {tweet_id}...", total=None)
+
+        try:
+            rep = asyncio.run(_fetch())
+            progress.stop()
+        except NoAccountError:
+            progress.stop()
+            console.print("[red]No X accounts configured.[/red]")
+            console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
+            raise click.Abort()
+        except Exception as e:
+            progress.stop()
+            console.print(f"[red]Error: {e}[/red]")
+            raise click.Abort()
+
+    if not rep:
+        console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
+        return
+
+    # Parse article from response
+    response_json = rep.json()
+    article = parse_article_from_response(response_json)
+
+    if not article:
+        console.print(f"[yellow]No article found in tweet {tweet_id}[/yellow]")
+        return
+
+    console.print(f"[green]Found article: {article.title}[/green]")
+
+    if json_output or output:
+        if raw:
+            # Output raw blocks
+            data = {
+                "rest_id": article.rest_id,
+                "title": article.title,
+                "preview_text": article.preview_text,
+                "cover_image_url": article.cover_image_url,
+                "content_blocks": article.content_blocks,
+            }
+        else:
+            data = article.to_dict()
+
+        if output:
+            if output.endswith('.json') or json_output:
+                save_to_file(json.dumps(data, indent=2), output, 'json')
+            else:
+                # Save as markdown
+                save_to_file(article.to_markdown(), output, 'md')
+        if json_output and not output:
+            console.print_json(json.dumps(data, indent=2))
+    else:
+        # Display as markdown
+        markdown_content = article.to_markdown()
+        console.print()
+        console.print(markdown_content)
+        console.print()
+        if article.cover_image_url:
+            console.print(f"[dim]Cover image: {article.cover_image_url}[/dim]")
 
 
 @x.command(name='user')

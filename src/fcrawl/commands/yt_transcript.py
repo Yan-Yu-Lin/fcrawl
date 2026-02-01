@@ -55,6 +55,10 @@ class YouTubeTranscriptDownloader:
                 video_id = info.get('id', '')
                 duration = info.get('duration', 0)
                 channel = info.get('channel', info.get('uploader', 'Unknown'))
+                description = info.get('description', '')
+                channel_id = info.get('channel_id', '')
+                upload_date = info.get('upload_date', '')
+                view_count = info.get('view_count', 0)
 
                 # Get captions
                 auto_captions = info.get('automatic_captions', {})
@@ -132,6 +136,10 @@ class YouTubeTranscriptDownloader:
                             "title": title,
                             "video_id": video_id,
                             "channel": channel,
+                            "channel_id": channel_id,
+                            "description": description,
+                            "upload_date": upload_date,
+                            "view_count": view_count,
                             "duration": duration,
                             "language": selected_lang,
                             "available_languages": available_langs,
@@ -148,6 +156,10 @@ class YouTubeTranscriptDownloader:
                     "title": title,
                     "video_id": video_id,
                     "channel": channel,
+                    "channel_id": channel_id,
+                    "description": description,
+                    "upload_date": upload_date,
+                    "view_count": view_count,
                     "duration": duration,
                     "language": selected_lang,
                     "available_languages": available_langs,
@@ -302,7 +314,36 @@ def yt_transcript(
         content = result
         format_type = 'json'
     else:
-        content = result["transcript"]
+        # Format duration
+        duration = result.get('duration', 0)
+        mins, secs = divmod(duration, 60)
+        hours, mins = divmod(mins, 60)
+        duration_str = f"{hours}:{mins:02d}:{secs:02d}" if hours else f"{mins}:{secs:02d}"
+
+        # Format upload date (YYYYMMDD -> YYYY-MM-DD)
+        upload_date = result.get('upload_date', '')
+        if len(upload_date) == 8:
+            upload_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+
+        # Format view count with commas
+        view_count = result.get('view_count', 0)
+        view_count_str = f"{view_count:,}" if view_count else "N/A"
+
+        # Build metadata header
+        lines = [
+            f"Title: {result['title']}",
+            f"Channel: {result['channel']} ({result.get('channel_id', 'N/A')})",
+            f"Upload Date: {upload_date or 'N/A'}",
+            f"Duration: {duration_str}",
+            f"Views: {view_count_str}",
+        ]
+        if result.get('description'):
+            lines.append(f"Description: {result['description']}")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+        lines.append(result["transcript"])
+        content = "\n".join(lines)
         format_type = 'markdown'
 
     handle_output(
