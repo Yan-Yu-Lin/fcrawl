@@ -1,4 +1,11 @@
-"""YouTube transcript command for fcrawl"""
+"""YouTube transcript command for fcrawl
+
+Features:
+- Download YouTube subtitles/captions (manual or auto-generated)
+- Auto-fallback to local SenseVoice transcription when no subtitles
+- Traditional Chinese output by default (configurable)
+- Cookie support for age-restricted/region-locked videos
+"""
 
 import json
 import re
@@ -16,7 +23,14 @@ from ..utils.config import load_config
 
 
 class YouTubeTranscriptDownloader:
-    """Download transcripts from YouTube videos using yt-dlp's native downloader"""
+    """Download transcripts from YouTube videos using yt-dlp's native downloader.
+
+    Features:
+    - Fetch manual or auto-generated subtitles
+    - Auto-fallback to local SenseVoice transcription when no subtitles
+    - Traditional Chinese conversion by default
+    - Cookie support for restricted videos
+    """
 
     def __init__(
         self,
@@ -25,12 +39,18 @@ class YouTubeTranscriptDownloader:
         cookies_from_browser: Optional[str] = None,
         cookies_on_fail: bool = True,
         prefer_cookies: bool = False,
+        no_transcribe: bool = False,
+        force_transcribe: bool = False,
+        simplified: bool = False,
     ):
         self.quiet = quiet
         self.cookies_file = cookies_file
         self.cookies_from_browser = cookies_from_browser
         self.cookies_on_fail = cookies_on_fail
         self.prefer_cookies = prefer_cookies
+        self.no_transcribe = no_transcribe
+        self.force_transcribe = force_transcribe
+        self.simplified = simplified
 
     def log(self, msg: str):
         if not self.quiet:
@@ -62,9 +82,6 @@ class YouTubeTranscriptDownloader:
             opts["cookiefile"] = self.cookies_file
 
         if self.cookies_from_browser:
-            # yt-dlp Python API uses the same key as CLI option: cookiesfrombrowser
-            # We accept simple forms like: "chrome" or "firefox".
-            # For advanced formats (profiles/containers), users should prefer a cookiefile.
             parts = self.cookies_from_browser.split(":", 1)
             browser = parts[0].strip()
             if not browser:
@@ -80,8 +97,6 @@ class YouTubeTranscriptDownloader:
     def _extract_info(self, video_url: str, use_cookies: bool) -> dict[str, Any]:
         info_opts = {
             "skip_download": True,
-            # Mirror --ignore-no-formats-error for robustness; YouTube sometimes
-            # blocks format extraction while still allowing caption endpoints.
             "ignore_no_formats_error": True,
             "quiet": True,
             "no_warnings": True,
@@ -100,9 +115,6 @@ class YouTubeTranscriptDownloader:
         with tempfile.TemporaryDirectory() as tmpdir:
             sub_opts = {
                 "skip_download": True,
-                # Some videos are missing formats when yt-dlp can't solve the
-                # n-challenge, but subtitles can still be fetched. This mirrors
-                # CLI flag: --ignore-no-formats-error
                 "ignore_no_formats_error": True,
                 "writesubtitles": True,
                 "writeautomaticsub": True,
@@ -202,9 +214,39 @@ class YouTubeTranscriptDownloader:
     ) -> dict:
         """Get transcript and metadata from a YouTube video using yt-dlp."""
 
+        # Force local transcription - skip subtitle fetch entirely
+        if self.force_transcribe:
+            self.log("Force transcribe enabled, using SenseVoice...")
+            try:
+                if self.prefer_cookies and self._has_cookies():
+                    info = self._extract_info(video_url, use_cookies=True)
+                else:
+                    info = self._extract_info(video_url, use_cookies=False)
+            except yt_dlp.utils.DownloadError as e:
+                if self._should_retry_with_cookies(e):
+                    info = self._extract_info(video_url, use_cookies=True)
+                else:
+                    raise
+            return self._transcribe_audio(video_url, info)
+
         # First, get video info to find available languages
         meta = self.get_available_languages(video_url)
+
+        # If no subtitles available, try ASR fallback
         if "error" in meta:
+            if not self.no_transcribe and "No subtitles available" in meta.get("error", ""):
+                self.log("No subtitles found, transcribing with SenseVoice...")
+                try:
+                    if self.prefer_cookies and self._has_cookies():
+                        info = self._extract_info(video_url, use_cookies=True)
+                    else:
+                        info = self._extract_info(video_url, use_cookies=False)
+                except yt_dlp.utils.DownloadError as e:
+                    if self._should_retry_with_cookies(e):
+                        info = self._extract_info(video_url, use_cookies=True)
+                    else:
+                        return meta
+                return self._transcribe_audio(video_url, info)
             return meta
 
         available_langs = meta.get("available_languages", [])
@@ -357,6 +399,109 @@ class YouTubeTranscriptDownloader:
         except json.JSONDecodeError:
             return self._parse_vtt(text)
 
+    def _transcribe_audio(self, video_url: str, info: dict) -> dict:
+        """
+        Fallback: Download audio and transcribe locally with SenseVoice.
+
+        Used when no subtitles are available for the video.
+        """
+        from ..utils.transcriber import SenseVoiceTranscriber
+
+        title = info.get('title', 'Unknown')
+        video_id = info.get('id', '')
+        duration = info.get('duration', 0)
+        channel = info.get('channel', info.get('uploader', 'Unknown'))
+        channel_id = info.get('channel_id', '')
+        description = info.get('description', '')
+        upload_date = info.get('upload_date', '')
+        view_count = info.get('view_count', 0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.log("Downloading audio...")
+
+            # Download audio only
+            audio_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'wav',
+                    'preferredquality': '192',
+                }],
+                'postprocessor_args': ['-ar', '16000', '-ac', '1'],
+                'quiet': True,
+                'no_warnings': True,
+                'noprogress': True,
+                'logger': type('QuietLogger', (), {
+                    'debug': lambda *a: None,
+                    'warning': lambda *a: None,
+                    'error': lambda *a: None
+                })(),
+            }
+
+            # Apply cookies if available
+            if self._has_cookies():
+                self._apply_cookie_opts(audio_opts)
+
+            try:
+                with yt_dlp.YoutubeDL(audio_opts) as ydl:
+                    ydl.download([video_url])
+            except Exception as e:
+                return {"error": f"Failed to download audio: {e}"}
+
+            # Find the downloaded audio file
+            wav_file = None
+            for filename in os.listdir(tmpdir):
+                if filename.endswith('.wav'):
+                    wav_file = os.path.join(tmpdir, filename)
+                    break
+
+            if not wav_file:
+                # Try other formats if WAV wasn't created
+                for ext in ['.m4a', '.mp3', '.webm', '.opus']:
+                    for filename in os.listdir(tmpdir):
+                        if filename.endswith(ext):
+                            wav_file = os.path.join(tmpdir, filename)
+                            break
+                    if wav_file:
+                        break
+
+            if not wav_file:
+                return {"error": "Failed to extract audio from video"}
+
+            # Transcribe with SenseVoice
+            self.log("Transcribing with SenseVoice...")
+            transcriber = SenseVoiceTranscriber(quiet=self.quiet)
+
+            try:
+                result = transcriber.transcribe_file(
+                    wav_file,
+                    language="auto",
+                    traditional=not self.simplified,
+                )
+            finally:
+                transcriber.cleanup()
+
+            if result.error:
+                return {"error": f"Transcription failed: {result.error}"}
+
+            transcript = result.text_clean
+
+            return {
+                "title": title,
+                "video_id": video_id,
+                "channel": channel,
+                "channel_id": channel_id,
+                "description": description,
+                "upload_date": upload_date,
+                "view_count": view_count,
+                "duration": duration,
+                "language": "auto-detected",
+                "available_languages": [],
+                "transcript": transcript,
+                "transcription_method": "sensevoice-local",
+            }
+
 
 @click.command("yt-transcript")
 @click.argument("url")
@@ -380,6 +525,12 @@ class YouTubeTranscriptDownloader:
     default=True,
     help="Retry with cookies if YouTube throttles/blocks unauthenticated requests",
 )
+@click.option("--no-transcribe", is_flag=True,
+              help="Disable auto-transcription fallback when no subtitles")
+@click.option("--force-transcribe", "-t", is_flag=True,
+              help="Force local transcription (ignore YouTube subtitles)")
+@click.option("--simplified", is_flag=True,
+              help="Output Simplified Chinese (default: Traditional)")
 def yt_transcript(
     url: str,
     lang: Optional[str],
@@ -391,14 +542,30 @@ def yt_transcript(
     cookies: Optional[str],
     cookies_from_browser: Optional[str],
     cookies_on_fail: bool,
+    no_transcribe: bool,
+    force_transcribe: bool,
+    simplified: bool,
 ):
-    """Download transcript from a YouTube video
+    """Download transcript from a YouTube video.
+
+    Auto-transcribes with local SenseVoice if no subtitles are available.
+    Outputs Traditional Chinese by default.
 
     Examples:
+
         fcrawl yt-transcript "https://youtube.com/watch?v=VIDEO_ID"
+
         fcrawl yt-transcript "https://youtu.be/VIDEO_ID" --lang zh-Hant
+
         fcrawl yt-transcript "https://youtube.com/watch?v=VIDEO_ID" --list-langs
+
         fcrawl yt-transcript "https://youtube.com/watch?v=VIDEO_ID" --json
+
+        fcrawl yt-transcript URL --no-transcribe  # Disable local ASR fallback
+
+        fcrawl yt-transcript URL -t               # Force local transcription
+
+        fcrawl yt-transcript URL --simplified     # Output Simplified Chinese
     """
     cfg = load_config()
     cookies_file = cookies or cfg.get("yt_cookies_file")
@@ -428,6 +595,9 @@ def yt_transcript(
         cookies_on_fail=cookies_on_fail,
         # If the user explicitly provides cookies on the CLI, use them immediately.
         prefer_cookies=bool(cookies or cookies_from_browser),
+        no_transcribe=no_transcribe,
+        force_transcribe=force_transcribe,
+        simplified=simplified,
     )
 
     # Validate URL
@@ -529,6 +699,8 @@ def yt_transcript(
         ]
         if result.get("description"):
             lines.append(f"Description: {result['description']}")
+        if result.get("transcription_method"):
+            lines.append(f"Transcription: {result['transcription_method']}")
         lines.append("")
         lines.append("---")
         lines.append("")

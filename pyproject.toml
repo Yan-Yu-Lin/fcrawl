@@ -20,6 +20,11 @@ dependencies = [
     "requests>=2.32.5",
     "rich>=14.2.0",
     "yt-dlp>=2025.12.8",
+    # ASR dependencies for local transcription
+    "funasr>=1.0.0",
+    "torch>=2.0.0",
+    "pydub>=0.25.1",
+    "opencc-python-reimplemented>=0.1.7",
 ]
 
 [project.scripts]
