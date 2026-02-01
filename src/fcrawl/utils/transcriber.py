@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import opencc
+from opencc import OpenCC
 from pydub import AudioSegment
 
 from .output import console
@@ -45,7 +45,7 @@ def clean_transcript(text: str) -> str:
 
 def convert_to_traditional(text: str) -> str:
     """Convert Simplified Chinese to Traditional Chinese using OpenCC."""
-    converter = opencc.OpenCC('s2t')
+    converter = OpenCC('s2t')
     return converter.convert(text)
 
 
