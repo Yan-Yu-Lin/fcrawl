@@ -21,10 +21,11 @@ dependencies = [
     "rich>=14.2.0",
     "yt-dlp>=2025.12.8",
     # ASR dependencies for local transcription
-    "funasr>=1.0.0",
-    "torch>=2.0.0",
+    "funasr>=1.3.0",
+    "torch>=2.9.0",
+    "torchaudio>=2.9.0",
     "pydub>=0.25.1",
-    "opencc-python-reimplemented>=0.1.7",
+    "opencc>=1.1.9",
 ]
 
 [project.scripts]
@@ -39,3 +40,11 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fcrawl"]
+
+[tool.uv]
+# Override old deps to get Python 3.13 compatible versions
+override-dependencies = [
+    "numba>=0.60.0",
+    "librosa>=0.10.0",
+    "llvmlite>=0.43.0",
+]
