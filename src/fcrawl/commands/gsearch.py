@@ -140,6 +140,10 @@ def _google_search(query: str, limit: int, headless: bool, locale: Optional[str]
         "block_images": True,
         "i_know_what_im_doing": True,
         "os": _get_os_name(),
+        # Fix User-Agent bug in Camoufox v135 (Firefox/v135.0 -> Firefox/135.0)
+        "config": {
+            "navigator.userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"
+        },
     }
     if locale:
         camoufox_opts["locale"] = locale

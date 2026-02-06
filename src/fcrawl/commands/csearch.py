@@ -1,204 +1,127 @@
-"""Multi-engine search command using Camoufox (anti-detection browser)"""
+"""Fast Google search using Serper.dev API"""
 
-import asyncio
+import os
 import click
-import json
 import time
+import requests
 from typing import Optional
 
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from ..utils.output import handle_output, console
 from ..utils.cache import cache_key, read_cache, write_cache
-from ..engines import get_engine, get_all_engines, ENGINES
-from ..engines.base import SearchResult, EngineStatus
-from ..engines.aggregator import aggregate_results, format_engines_badge, get_aggregation_stats
+from ..utils.config import load_config
 
 
-def _check_camoufox_installed() -> bool:
-    """Check if Camoufox Python package is installed"""
-    try:
-        from camoufox.sync_api import Camoufox
-        return True
-    except ImportError:
-        return False
+SERPER_ENDPOINT = "https://google.serper.dev/search"
 
 
-def _check_camoufox_browser() -> bool:
-    """Check if Camoufox browser binary is downloaded"""
-    try:
-        from pathlib import Path
-        import sys
-        if sys.platform == "darwin":
-            cache_dir = Path.home() / "Library" / "Caches" / "camoufox"
-            browser_path = cache_dir / "Camoufox.app" / "Contents" / "MacOS" / "camoufox"
-        elif sys.platform == "win32":
-            cache_dir = Path.home() / "AppData" / "Local" / "camoufox"
-            browser_path = cache_dir / "camoufox" / "camoufox.exe"
-        else:  # Linux
-            cache_dir = Path.home() / ".cache" / "camoufox"
-            browser_path = cache_dir / "camoufox" / "camoufox"
-        return browser_path.exists()
-    except Exception:
-        return False
+def _get_serper_api_key() -> str:
+    """Get Serper API key from env var or config file"""
+    # Env var takes priority
+    if os.environ.get("SERPER_API_KEY"):
+        return os.environ["SERPER_API_KEY"]
+    # Fall back to config file
+    config = load_config()
+    return config.get("serper_api_key", "")
 
 
-def _search_single_engine(
-    engine_name: str,
+def _parse_locale(locale: Optional[str]) -> tuple[str, str]:
+    """Parse locale string (e.g., 'ja-JP') into gl and hl parameters"""
+    if not locale:
+        return "us", "en"
+
+    parts = locale.lower().split("-")
+    hl = parts[0]  # Language code (e.g., "ja")
+    gl = parts[1] if len(parts) > 1 else parts[0]  # Country code (e.g., "jp")
+    return gl, hl
+
+
+def _serper_search(
     query: str,
     limit: int,
-    headless: bool,
-    locale: Optional[str]
-) -> tuple[str, list[SearchResult], EngineStatus]:
-    """Search a single engine and return results with status (creates own browser)"""
-    engine_class = get_engine(engine_name)
-    engine = engine_class()
-    results, status = engine.search(query, limit, headless=headless, locale=locale)
-    return engine_name, results, status
-
-
-async def _search_engine_async(
-    browser,
-    engine_name: str,
-    query: str,
-    limit: int,
-    locale: Optional[str]
-) -> tuple[str, list[SearchResult], EngineStatus]:
-    """
-    Async search using a shared browser with engine-specific context.
-    Each call creates its own BrowserContext (isolated cookies, storage).
-    Thread-safe when used with asyncio.gather on a single browser.
-    """
-    engine_class = get_engine(engine_name)
-    engine = engine_class()
-
-    # Create context with engine-specific options (locale, headers)
-    context_opts = engine.get_context_options(locale)
-    context = await browser.new_context(**context_opts)
-
-    try:
-        # Set up engine-specific cookies (async version)
-        await engine.setup_context_async(context, locale)
-
-        # Create page and run search (async version)
-        page = await context.new_page()
-        results, status = await engine.search_with_page_async(page, query, limit, locale)
-        return engine_name, results, status
-    finally:
-        # Always close the context to free resources
-        await context.close()
-
-
-async def _search_all_engines_async(
-    engines_to_use: list[str],
-    query: str,
-    per_engine_limit: int,
-    headful: bool,
     locale: Optional[str],
-    progress_callback=None
-) -> list[tuple[str, list[SearchResult], EngineStatus]]:
+    api_key: str,
+) -> tuple[list[dict], float, Optional[str]]:
     """
-    Search all engines concurrently using asyncio.gather.
-    Uses a single shared browser with multiple contexts (thread-safe pattern).
+    Search using Serper API.
+    Returns: (results, elapsed_time, error_message)
     """
-    from camoufox.async_api import AsyncCamoufox
+    gl, hl = _parse_locale(locale)
 
-    # Get OS name from first engine for browser spoofing
-    first_engine = get_engine(engines_to_use[0])()
-    os_name = first_engine.os_name
-
-    browser_opts = {
-        "headless": not headful,
-        "humanize": True,
-        "block_images": True,
-        "i_know_what_im_doing": True,
-        "os": os_name,
+    payload = {
+        "q": query,
+        "gl": gl,
+        "hl": hl,
+        "num": min(limit, 100),  # Serper max is 100
     }
 
-    results = []
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
 
-    async with AsyncCamoufox(**browser_opts) as browser:
-        # Create tasks for all engines
-        tasks = [
-            _search_engine_async(browser, eng, query, per_engine_limit, locale)
-            for eng in engines_to_use
-        ]
+    start = time.time()
 
-        # Run all searches concurrently
-        task_results = await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        response = requests.post(
+            SERPER_ENDPOINT,
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
+        elapsed = time.time() - start
 
-        # Process results, handling any exceptions
-        for i, result in enumerate(task_results):
-            engine_name = engines_to_use[i]
-            if isinstance(result, Exception):
-                # Convert exception to failed status
-                results.append((
-                    engine_name,
-                    [],
-                    EngineStatus(
-                        engine=engine_name,
-                        success=False,
-                        error=str(result)
-                    )
-                ))
-            else:
-                results.append(result)
+        if response.status_code != 200:
+            return [], elapsed, f"API error: {response.status_code} - {response.text[:100]}"
 
-            # Call progress callback if provided
-            if progress_callback:
-                progress_callback()
+        data = response.json()
 
-    return results
+        # Convert Serper response to our format
+        results = []
+        for item in data.get("organic", []):
+            results.append({
+                "title": item.get("title", ""),
+                "url": item.get("link", ""),
+                "description": item.get("snippet", ""),
+                "position": item.get("position", 0),
+                "engines": ["google"],  # Serper = Google only
+            })
+
+        return results[:limit], elapsed, None
+
+    except requests.RequestException as e:
+        elapsed = time.time() - start
+        return [], elapsed, f"Request failed: {str(e)}"
 
 
-def _display_debug_info(statuses: list[EngineStatus], stats: dict, raw_count: int):
+def _display_debug_info(elapsed: float, result_count: int, locale: Optional[str]):
     """Display debug information about the search"""
-    console.print("\n[bold cyan]Engine Status:[/bold cyan]")
+    gl, hl = _parse_locale(locale)
+
+    console.print("\n[bold cyan]Serper API Status:[/bold cyan]")
 
     table = Table(show_header=True, header_style="bold")
-    table.add_column("Engine")
-    table.add_column("Status")
-    table.add_column("Results")
-    table.add_column("Time")
-    table.add_column("Error")
+    table.add_column("Field")
+    table.add_column("Value")
 
-    for status in statuses:
-        status_icon = "[green]OK[/green]" if status.success else "[red]FAIL[/red]"
-        error_msg = status.error[:40] + "..." if status.error and len(status.error) > 40 else (status.error or "")
-        table.add_row(
-            status.engine,
-            status_icon,
-            str(status.result_count),
-            f"{status.elapsed_time:.2f}s",
-            error_msg
-        )
+    table.add_row("Engine", "Google (via Serper)")
+    table.add_row("Status", "[green]OK[/green]")
+    table.add_row("Results", str(result_count))
+    table.add_row("Response Time", f"{elapsed*1000:.0f}ms")
+    table.add_row("Country (gl)", gl)
+    table.add_row("Language (hl)", hl)
 
     console.print(table)
 
-    console.print("\n[bold cyan]Aggregation:[/bold cyan]")
-    console.print(f"  Total raw results: {raw_count}")
-    console.print(f"  After deduplication: {stats['total']}")
 
-    if stats['by_engine_count']:
-        console.print("\n[bold cyan]Results by source count:[/bold cyan]")
-        for count in sorted(stats['by_engine_count'].keys(), reverse=True):
-            num = stats['by_engine_count'][count]
-            engine_word = "engine" if count == 1 else "engines"
-            console.print(f"  Found by {count} {engine_word}: {num} results")
-
-
-def _display_results(results: list[dict], show_engines: bool = True):
-    """Display aggregated search results"""
+def _display_results(results: list[dict]):
+    """Display search results"""
     console.print("\n[bold]Search Results[/bold]", justify="center")
     console.print("=" * 60)
 
     for r in results:
-        # Engine badge
-        if show_engines and len(r.get('engines', [])) > 1:
-            badge = format_engines_badge(r['engines'])
-            console.print(f"[dim]{badge}[/dim]")
-
         title = r.get('title', 'No title')
         url = r.get('url', '')
         description = r.get('description', '')
@@ -215,11 +138,11 @@ def _display_results(results: list[dict], show_engines: bool = True):
 @click.command()
 @click.argument('query')
 @click.option('--engine', '-e', default='all',
-              help='Engine to use: google, bing, brave, or all (default: all)')
+              help='(Ignored) Serper uses Google only')
 @click.option('--limit', '-l', type=int, default=20,
               help='Maximum number of results (default: 20)')
-@click.option('--headful', is_flag=True,
-              help='Show browser window (for debugging)')
+@click.option('--headful', is_flag=True, hidden=True,
+              help='(Ignored) No browser used')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 @click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
@@ -227,9 +150,9 @@ def _display_results(results: list[dict], show_engines: bool = True):
 @click.option('--cache-only', 'cache_only', is_flag=True, help='Only read from cache, no search')
 @click.option('--locale', '-L', default=None,
               help='Locale for regional results (e.g., ja-JP, en-GB, zh-TW)')
-@click.option('--debug', is_flag=True, help='Show detailed engine status and stats')
-@click.option('--parallel/--sequential', default=True,
-              help='Run engines in parallel (default) or sequentially')
+@click.option('--debug', is_flag=True, help='Show detailed API status and stats')
+@click.option('--parallel/--sequential', default=True, hidden=True,
+              help='(Ignored) Single API call')
 def csearch(
     query: str,
     engine: str,
@@ -244,66 +167,38 @@ def csearch(
     debug: bool,
     parallel: bool,
 ):
-    """Multi-engine search using Camoufox browser
+    """Fast Google search using Serper.dev API
 
-    Search across multiple engines (Google, Bing, Brave) with automatic
-    result aggregation and deduplication. Uses anti-detection browser
-    to avoid being blocked.
-
-    \b
-    Engines:
-        google  - Google Search
-        bing    - Microsoft Bing
-        brave   - Brave Search
-        all     - Query all engines and aggregate results
+    Lightning-fast Google search results (~1 second) via Serper API.
+    Requires SERPER_API_KEY environment variable.
 
     \b
-    First-time setup:
-        python -m camoufox fetch    # Download the browser (~100MB)
+    Setup:
+        export SERPER_API_KEY="your_api_key"
 
     \b
     Examples:
-        fcrawl csearch "python tutorials"              # All engines
-        fcrawl csearch "python" -e google              # Google only
-        fcrawl csearch "python" -e bing -l 30          # Bing, 30 results
-        fcrawl csearch "python" --debug                # Show engine stats
-        fcrawl csearch "python" --headful              # Debug: show browser
-        fcrawl csearch "news" -L ja-JP                 # Japanese results
-        fcrawl csearch "python" --sequential           # One engine at a time
+        fcrawl csearch "python tutorials"
+        fcrawl csearch "python" -l 30
+        fcrawl csearch "news" -L ja-JP              # Japanese results
+        fcrawl csearch "restaurants" -L zh-TW       # Taiwan results
+        fcrawl csearch "python" --debug             # Show API stats
     """
-    # Check Camoufox installation
-    if not _check_camoufox_installed():
-        console.print("[red]Camoufox is not installed.[/red]")
-        console.print("Install with: [cyan]pip install camoufox[geoip][/cyan]")
+    # Check API key
+    api_key = _get_serper_api_key()
+    if not api_key:
+        console.print("[red]SERPER_API_KEY environment variable not set.[/red]")
+        console.print("Get your API key at: [cyan]https://serper.dev[/cyan]")
+        console.print("Then: [cyan]export SERPER_API_KEY='your_key'[/cyan]")
         raise click.Abort()
-
-    if not _check_camoufox_browser():
-        console.print("[yellow]Camoufox browser not found.[/yellow]")
-        console.print("Download with: [cyan]python -m camoufox fetch[/cyan]")
-        raise click.Abort()
-
-    # Determine which engines to use
-    engine = engine.lower()
-    if engine == 'all':
-        engines_to_use = get_all_engines()
-    else:
-        # Support comma-separated list
-        engines_to_use = [e.strip() for e in engine.split(',')]
-        # Validate engines
-        for e in engines_to_use:
-            if e not in ENGINES:
-                console.print(f"[red]Unknown engine: {e}[/red]")
-                console.print(f"Available engines: {', '.join(get_all_engines())}")
-                raise click.Abort()
-
-    # Calculate per-engine limit for aggregation mode
-    per_engine_limit = limit if len(engines_to_use) == 1 else max(10, limit // len(engines_to_use) + 5)
 
     # Generate cache key
+    gl, hl = _parse_locale(locale)
     cache_opts = {
-        'engines': sorted(engines_to_use),
+        'engine': 'serper',
         'limit': limit,
-        'locale': locale,
+        'gl': gl,
+        'hl': hl,
     }
     key = cache_key(query, cache_opts)
 
@@ -324,86 +219,28 @@ def csearch(
 
     # Perform search if not cached
     if not from_cache:
-        all_results: list[SearchResult] = []
-        all_statuses: list[EngineStatus] = []
-
-        if debug:
-            console.print(f"\n[bold]Querying engines: {', '.join(engines_to_use)}[/bold]\n")
-
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
             console=console
         ) as progress:
-            main_task = progress.add_task(
-                f"Searching {len(engines_to_use)} engine(s)...",
-                total=len(engines_to_use)
-            )
+            progress.add_task(f"Searching '{query}'...", total=None)
 
-            if parallel and len(engines_to_use) > 1:
-                # Async parallel execution using asyncio.gather
-                # ONE browser, multiple contexts running concurrently (thread-safe)
-                try:
-                    # Run async search in event loop
-                    async_results = asyncio.run(
-                        _search_all_engines_async(
-                            engines_to_use,
-                            query,
-                            per_engine_limit,
-                            headful,
-                            locale,
-                            progress_callback=lambda: progress.advance(main_task)
-                        )
-                    )
+            results, elapsed, error = _serper_search(query, limit, locale, api_key)
 
-                    # Process results
-                    for engine_name, results, status in async_results:
-                        all_results.extend(results)
-                        all_statuses.append(status)
-
-                except Exception as e:
-                    # Browser creation or overall async execution failed
-                    for eng in engines_to_use:
-                        all_statuses.append(EngineStatus(
-                            engine=eng,
-                            success=False,
-                            error=f"Async execution failed: {str(e)}"
-                        ))
-                        progress.advance(main_task)
-            else:
-                # Sequential execution
-                for eng in engines_to_use:
-                    try:
-                        _, results, status = _search_single_engine(
-                            eng, query, per_engine_limit, not headful, locale
-                        )
-                        all_results.extend(results)
-                        all_statuses.append(status)
-                    except Exception as e:
-                        all_statuses.append(EngineStatus(
-                            engine=eng,
-                            success=False,
-                            error=str(e)
-                        ))
-                    progress.advance(main_task)
-
-        # Aggregate results
-        raw_count = len(all_results)
-        aggregated = aggregate_results(all_results, limit=limit)
-        stats = get_aggregation_stats(aggregated)
+        if error:
+            console.print(f"[red]Error: {error}[/red]")
+            raise click.Abort()
 
         # Show debug info if requested
         if debug:
-            _display_debug_info(all_statuses, stats, raw_count)
+            _display_debug_info(elapsed, len(results), locale)
 
         # Prepare cache data
         cache_data = {
-            'results': aggregated,
-            'raw_count': raw_count,
-            'stats': stats,
-            'engines': engines_to_use,
+            'results': results,
+            'elapsed': elapsed,
+            'engine': 'serper',
         }
         write_cache('csearch', key, cache_data)
         cached_results = cache_data
@@ -419,16 +256,14 @@ def csearch(
     console.print(f"[green]Found {len(results)} results[/green]")
 
     # Display results
-    show_engines = len(engines_to_use) > 1
     if pretty and not output and not json_output:
-        _display_results(results, show_engines=show_engines)
+        _display_results(results)
 
     # Handle file/JSON output
     if output or json_output:
-        # Format for JSON output
         output_data = {
             'query': query,
-            'engines': cached_results.get('engines', engines_to_use),
+            'engine': 'serper',
             'results': results,
         }
         handle_output(
