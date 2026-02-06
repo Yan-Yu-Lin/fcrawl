@@ -22,9 +22,10 @@ from .utils.config import load_config, get_firecrawl_client
 
 console = Console()
 
+
 @click.group(invoke_without_command=True)
 @click.pass_context
-@click.version_option(version='0.1.0', prog_name='fcrawl')
+@click.version_option(version="0.1.0", prog_name="fcrawl")
 def cli(ctx):
     """
     fcrawl - Firecrawl CLI Tool
@@ -41,7 +42,8 @@ def cli(ctx):
     More commands:
         fcrawl crawl https://blog.com --limit 10    # Crawl site to folder
         fcrawl map https://docs.site.com            # Discover URLs
-        fcrawl search "query" --scrape              # Web search + scrape
+        fcrawl search "query"                       # Fast web search via Serper
+        fcrawl csearch "query"                      # Multi-engine browser search
 
     \b
     Notes:
@@ -53,10 +55,11 @@ def cli(ctx):
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
+
 # Register commands
 cli.add_command(scrape)
 cli.add_command(crawl)
-cli.add_command(map_site, name='map')
+cli.add_command(map_site, name="map")
 cli.add_command(extract)
 cli.add_command(search)
 cli.add_command(gsearch)
@@ -64,6 +67,7 @@ cli.add_command(csearch)
 cli.add_command(yt_transcript)
 cli.add_command(yt_channel)
 cli.add_command(x)
+
 
 @cli.command()
 def config():
@@ -73,6 +77,7 @@ def config():
     for key, value in config_data.items():
         console.print(f"  {key}: {value}")
 
+
 # REMOVED: quick is redundant - just use `fcrawl scrape URL`
 # @cli.command()
 # @click.argument('url')
@@ -80,5 +85,5 @@ def config():
 #     """Quick scrape with default settings (markdown to stdout)"""
 #     ...
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli()

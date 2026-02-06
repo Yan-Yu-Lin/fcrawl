@@ -1,52 +1,223 @@
-"""Search command for fcrawl"""
+"""Search command powered by Serper.dev API."""
+
+import os
+import time
+from typing import Optional
 
 import click
+import requests
 from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.console import Console
-from typing import List, Optional
+from rich.table import Table
 
-from ..utils.config import get_firecrawl_client
-from ..utils.output import handle_output, console, strip_links
-from ..utils.cache import cache_key, read_cache, write_cache, search_result_to_dict, CachedSearchResult
+from ..utils.cache import cache_key, read_cache, write_cache
+from ..utils.config import load_config
+from ..utils.output import console, handle_output
+
+
+SERPER_ENDPOINT = "https://google.serper.dev/search"
+SERPER_MAX_RESULTS_PER_PAGE = 100
+
+
+def _get_serper_api_key() -> str:
+    """Get Serper API key from env var or config file."""
+    if os.environ.get("SERPER_API_KEY"):
+        return os.environ["SERPER_API_KEY"]
+
+    config = load_config()
+    return config.get("serper_api_key", "")
+
+
+def _parse_locale(locale: Optional[str]) -> tuple[str, str]:
+    """Parse locale string into (gl, hl) for Serper."""
+    if not locale:
+        return "us", "en"
+
+    parts = locale.replace("_", "-").split("-")
+    lang = (parts[0] or "en").lower()
+    gl = "us"
+
+    if len(parts) > 1:
+        region = (parts[1] or "").lower()
+        if len(region) == 2 and region.isalpha():
+            gl = region
+        elif region in {"hant", "tw", "hk", "mo"}:
+            gl = "tw"
+        elif region in {"hans", "cn", "sg"}:
+            gl = "cn"
+
+    return gl, lang
+
+
+def _serper_search(
+    query: str,
+    limit: int,
+    locale: Optional[str],
+    location: Optional[str],
+    api_key: str,
+) -> tuple[list[dict], float, Optional[str], int, str, str]:
+    """Search using Serper with pagination and deduplication."""
+    gl, hl = _parse_locale(locale)
+    headers = {
+        "X-API-KEY": api_key,
+        "Content-Type": "application/json",
+    }
+
+    start = time.time()
+    results: list[dict] = []
+    seen_urls: set[str] = set()
+    page = 1
+
+    try:
+        while len(results) < limit:
+            batch_size = min(SERPER_MAX_RESULTS_PER_PAGE, limit - len(results))
+            payload = {
+                "q": query,
+                "gl": gl,
+                "hl": hl,
+                "num": batch_size,
+                "page": page,
+            }
+            if location:
+                payload["location"] = location
+
+            response = requests.post(
+                SERPER_ENDPOINT,
+                headers=headers,
+                json=payload,
+                timeout=30,
+            )
+
+            if response.status_code != 200:
+                elapsed = time.time() - start
+                return (
+                    [],
+                    elapsed,
+                    f"API error: {response.status_code} - {response.text[:120]}",
+                    page - 1,
+                    gl,
+                    hl,
+                )
+
+            data = response.json()
+            organic = data.get("organic", [])
+            if not organic:
+                break
+
+            page_added = 0
+            for item in organic:
+                url = item.get("link", "")
+                if not url or url in seen_urls:
+                    continue
+
+                seen_urls.add(url)
+                results.append(
+                    {
+                        "title": item.get("title", ""),
+                        "url": url,
+                        "description": item.get("snippet", ""),
+                        "position": len(results) + 1,
+                        "engines": ["google"],
+                    }
+                )
+                page_added += 1
+
+                if len(results) >= limit:
+                    break
+
+            if page_added == 0:
+                break
+
+            page += 1
+
+        elapsed = time.time() - start
+        pages_used = max(0, page - 1)
+        return results[:limit], elapsed, None, pages_used, gl, hl
+
+    except requests.RequestException as e:
+        elapsed = time.time() - start
+        return [], elapsed, f"Request failed: {str(e)}", max(0, page - 1), gl, hl
+
+
+def _display_debug_info(
+    result_count: int,
+    elapsed: float,
+    gl: str,
+    hl: str,
+    pages: int,
+    from_cache: bool,
+    location: Optional[str],
+):
+    """Display debug information about Serper request handling."""
+    console.print("\n[bold cyan]Search Debug:[/bold cyan]")
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Field")
+    table.add_column("Value")
+
+    table.add_row("Provider", "Serper (Google)")
+    table.add_row("Source", "Cache" if from_cache else "Network")
+    table.add_row("Results", str(result_count))
+    table.add_row("Response Time", f"{elapsed * 1000:.0f}ms")
+    table.add_row("Pages Used", str(pages))
+    table.add_row("Country (gl)", gl)
+    table.add_row("Language (hl)", hl)
+    table.add_row("Location", location or "(none)")
+
+    console.print(table)
+
+
+def _display_results(results: list[dict]):
+    """Display search results in pretty mode."""
+    console.print("\n[bold]Search Results[/bold]", justify="center")
+    console.print("=" * 60)
+
+    for item in results:
+        title = item.get("title", "No title")
+        url = item.get("url", "")
+        description = item.get("description", "")
+
+        console.print(f"[bold cyan]## {title}[/bold cyan]")
+        console.print(f"[blue]{url}[/blue]")
+        if description:
+            console.print(description)
+        console.print()
+
+    console.print("=" * 60)
+
 
 @click.command()
-@click.argument('query')
-@click.option('--sources', '-s', multiple=True,
-              type=click.Choice(['web', 'news', 'images']),
-              help='Search sources (can specify multiple: -s web -s news)')
-@click.option('--category', '-c', multiple=True,
-              type=click.Choice(['github', 'research']),
-              help='Category filters (github, research)')
-@click.option('--limit', '-l', type=int, default=15,
-              help='Maximum number of results per source (default: 15)')
-@click.option('--tbs',
-              type=click.Choice(['qdr:h', 'qdr:d', 'qdr:w', 'qdr:m', 'qdr:y']),
-              help='Time filter (h=hour, d=day, w=week, m=month, y=year)')
-@click.option('--location', help='Location for search results')
-@click.option('--scrape', is_flag=True,
-              help='Scrape the search results (returns full content)')
-@click.option('--no-links', is_flag=True,
-              help='Strip markdown links when scraping')
-@click.option('-f', '--format', 'formats', multiple=True,
-              default=['markdown'],
-              type=click.Choice(['markdown', 'html', 'links']),
-              help='Output formats when scraping (default: markdown)')
-@click.option('-o', '--output', help='Save output to file')
-@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-@click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
-@click.option('--no-cache', 'no_cache', is_flag=True, help='Bypass cache, force fresh fetch')
-@click.option('--cache-only', 'cache_only', is_flag=True, help='Only read from cache, no API call')
-@click.option('--debug', is_flag=True, help='Show engine status and result sources')
+@click.argument("query")
+@click.option(
+    "--limit",
+    "-l",
+    type=int,
+    default=20,
+    help="Maximum number of results (default: 20)",
+)
+@click.option(
+    "--locale",
+    "-L",
+    default=None,
+    help="Locale for regional results (e.g., ja-JP, en-GB, zh-TW)",
+)
+@click.option(
+    "--location", default=None, help="Geographic location (e.g., 'Taipei, Taiwan')"
+)
+@click.option("-o", "--output", help="Save output to file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option(
+    "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
+)
+@click.option(
+    "--cache-only", "cache_only", is_flag=True, help="Only read from cache, no search"
+)
+@click.option("--debug", is_flag=True, help="Show search provider stats")
 def search(
     query: str,
-    sources: tuple,
-    category: tuple,
     limit: int,
-    tbs: Optional[str],
+    locale: Optional[str],
     location: Optional[str],
-    scrape: bool,
-    no_links: bool,
-    formats: tuple,
     output: Optional[str],
     json_output: bool,
     pretty: bool,
@@ -54,251 +225,117 @@ def search(
     cache_only: bool,
     debug: bool,
 ):
-    """Search the web and optionally scrape results
+    """Search the web using Serper.dev (Google API)."""
+    if limit < 1:
+        raise click.BadParameter("limit must be >= 1", param_hint="--limit")
 
-    Examples:
-        fcrawl search "python tutorials"
-        fcrawl search "AI news" --sources news --limit 10
-        fcrawl search "python repos" --category github
-        fcrawl search "recent articles" --tbs qdr:d
-        fcrawl search "machine learning" --scrape -f markdown
-    """
-    # Prepare search options
-    search_options = {
-        'query': query,
-        'limit': limit
-    }
-
-    # Add sources if specified
-    if sources:
-        search_options['sources'] = [{'type': s} for s in sources]
-
-    # Add categories if specified
-    if category:
-        search_options['categories'] = [{'type': c} for c in category]
-
-    # Add time filter if specified
-    if tbs:
-        search_options['tbs'] = tbs
-
-    # Add location if specified
-    if location:
-        search_options['location'] = location
-
-    # Add scrape options if scraping is enabled
-    if scrape:
-        from firecrawl.types import ScrapeOptions
-        search_options['scrape_options'] = ScrapeOptions(
-            formats=list(formats)
-        )
-
-    # Generate cache key based on options that affect API result
+    gl, hl = _parse_locale(locale)
     cache_opts = {
-        'sources': list(sources) if sources else None,
-        'category': list(category) if category else None,
-        'limit': limit,
-        'tbs': tbs,
-        'location': location,
-        'scrape': scrape,
-        'formats': list(formats) if scrape else None,
+        "engine": "serper",
+        "limit": limit,
+        "gl": gl,
+        "hl": hl,
+        "location": location,
     }
     key = cache_key(query, cache_opts)
 
-    # Check cache first (unless --no-cache)
-    result = None
+    cached_data = None
     from_cache = False
     if not no_cache:
-        cached = read_cache('search', key)
+        cached = read_cache("search", key)
         if cached:
-            result = CachedSearchResult(cached)
+            cached_data = cached
             from_cache = True
-            console.print(f"[dim]Using cached result[/dim]")
+            console.print("[dim]Using cached result[/dim]")
 
-    # Handle --cache-only
     if cache_only and not from_cache:
         console.print(f"[red]Not in cache: {query}[/red]")
         raise click.Abort()
 
-    # Fetch from API if not cached
     if not from_cache:
+        api_key = _get_serper_api_key()
+        if not api_key:
+            console.print("[red]SERPER_API_KEY environment variable not set.[/red]")
+            console.print("Get your API key at: [cyan]https://serper.dev[/cyan]")
+            console.print("Then: [cyan]export SERPER_API_KEY='your_key'[/cyan]")
+            raise click.Abort()
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            console=console
+            console=console,
         ) as progress:
-            task = progress.add_task(f"Searching for '{query}'...", total=None)
+            progress.add_task(f"Searching '{query}'...", total=None)
+            results, elapsed, error, pages, gl, hl = _serper_search(
+                query=query,
+                limit=limit,
+                locale=locale,
+                location=location,
+                api_key=api_key,
+            )
 
-            try:
-                client = get_firecrawl_client()
-                result = client.search(**search_options)
+        if error:
+            console.print(f"[red]Error: {error}[/red]")
+            raise click.Abort()
 
-                progress.stop()
+        cached_data = {
+            "results": results,
+            "elapsed": elapsed,
+            "engine": "serper",
+            "gl": gl,
+            "hl": hl,
+            "pages": pages,
+            "location": location,
+        }
+        write_cache("search", key, cached_data)
 
-                # Write to cache
-                write_cache('search', key, search_result_to_dict(result))
+    cache_data = cached_data or {}
+    results = cache_data.get("results", [])
+    elapsed = float(cache_data.get("elapsed", 0.0))
+    pages = int(cache_data.get("pages", 0))
+    gl = str(cache_data.get("gl", gl))
+    hl = str(cache_data.get("hl", hl))
 
-            except Exception as e:
-                progress.stop()
-                console.print(f"[red]Error: {e}[/red]")
-                raise click.Abort()
-
-    # Process results
-    total_results = 0
-    if hasattr(result, 'web') and result.web:
-        total_results += len(result.web)
-    if hasattr(result, 'news') and result.news:
-        total_results += len(result.news)
-    if hasattr(result, 'images') and result.images:
-        total_results += len(result.images)
-
-    if total_results == 0:
+    if not results:
         console.print("[yellow]No results found[/yellow]")
         return
 
-    console.print(f"[green]✓ Found {total_results} results[/green]")
+    console.print(f"[green]Found {len(results)} results[/green]")
 
-    # Display debug info if requested
     if debug:
-        _display_debug_info(result)
+        _display_debug_info(
+            result_count=len(results),
+            elapsed=elapsed,
+            gl=gl,
+            hl=hl,
+            pages=pages,
+            from_cache=from_cache,
+            location=location,
+        )
 
-    # Display results based on output mode
     if pretty and not output and not json_output:
-        _display_search_results(result, scrape, debug)
+        _display_results(results)
 
-    # Prepare data for output
-    output_data = {}
-    if hasattr(result, 'web') and result.web:
-        output_data['web'] = [_format_result(r, scrape, no_links) for r in result.web]
-    if hasattr(result, 'news') and result.news:
-        output_data['news'] = [_format_result(r, scrape, no_links) for r in result.news]
-    if hasattr(result, 'images') and result.images:
-        output_data['images'] = [_format_result(r, scrape, no_links) for r in result.images]
-
-    # Handle output
     if output or json_output:
+        output_data = {
+            "query": query,
+            "engine": "serper",
+            "results": results,
+            "meta": {
+                "gl": gl,
+                "hl": hl,
+                "pages": pages,
+                "location": location,
+                "from_cache": from_cache,
+            },
+        }
         handle_output(
             output_data,
             output_file=output,
             json_output=True,
             pretty=pretty,
-            format_type='json'
+            format_type="json",
         )
     elif not pretty:
-        # Plain output for piping
-        for source_type, results in output_data.items():
-            for r in results:
-                print(r.get('url', ''))
-
-
-def _display_debug_info(result):
-    """Display engine status and statistics"""
-    from collections import Counter
-
-    console.print("\n[bold yellow]═══ DEBUG: Engine Status ═══[/bold yellow]")
-
-    # Show unresponsive engines
-    unresponsive = getattr(result, 'unresponsive_engines', None)
-    if unresponsive:
-        console.print("[red]Unresponsive engines:[/red]")
-        for engine_info in unresponsive:
-            if isinstance(engine_info, (list, tuple)) and len(engine_info) >= 2:
-                engine, reason = engine_info[0], engine_info[1]
-                console.print(f"  [red]✗[/red] {engine}: {reason}")
-    else:
-        console.print("[green]All engines responding[/green]")
-
-    # Count results by engine
-    engine_counts = Counter()
-    if hasattr(result, 'web') and result.web:
-        for item in result.web:
-            engine = getattr(item, 'engine', 'unknown')
-            if engine:
-                engine_counts[engine] += 1
-
-    if engine_counts:
-        console.print("\n[green]Results by engine:[/green]")
-        for engine, count in engine_counts.most_common():
-            console.print(f"  [green]✓[/green] {engine}: {count} results")
-
-    console.print("[yellow]════════════════════════════[/yellow]\n")
-
-
-def _display_search_results(result, include_content: bool, show_engines: bool = False):
-    """Display search results in clean text format"""
-
-    def _print_results(items, title_emoji: str):
-        """Print a section of results"""
-        # Centered header
-        console.print(f"\n[bold]{title_emoji}[/bold]", justify="center")
-        console.print("─" * 60)
-
-        for item in items:
-            title = getattr(item, 'title', 'No title')
-            url = getattr(item, 'url', '')
-            description = getattr(item, 'description', '')
-
-            # Title with engine tag if debug mode
-            if show_engines:
-                engines = getattr(item, 'engines', None)
-                if engines:
-                    engines_str = ', '.join(engines)
-                    console.print(f"[dim]({engines_str})[/dim] [bold cyan]## {title}[/bold cyan]")
-                else:
-                    console.print(f"[bold cyan]## {title}[/bold cyan]")
-            else:
-                console.print(f"[bold cyan]## {title}[/bold cyan]")
-            # URL
-            console.print(f"[blue]{url}[/blue]")
-            # Description
-            if description:
-                console.print(f"{description}")
-            # Content preview if scraped
-            if include_content:
-                content = getattr(item, 'markdown', '')
-                if content:
-                    preview = content[:200] + '...' if len(content) > 200 else content
-                    console.print(f"[dim]{preview}[/dim]")
-            console.print()
-
-        console.print("─" * 60)
-
-    # Display web results
-    if hasattr(result, 'web') and result.web:
-        _print_results(result.web, "🌐 Web Results")
-
-    # Display news results
-    if hasattr(result, 'news') and result.news:
-        _print_results(result.news, "📰 News Results")
-
-    # Display image results
-    if hasattr(result, 'images') and result.images:
-        _print_results(result.images, "🖼️  Image Results")
-
-
-def _format_result(item, include_content: bool, no_links: bool = False) -> dict:
-    """Format a search result item for JSON output"""
-    result = {}
-
-    # Basic fields
-    if hasattr(item, 'url'):
-        result['url'] = item.url
-    if hasattr(item, 'title'):
-        result['title'] = item.title
-    if hasattr(item, 'description'):
-        result['description'] = item.description
-
-    # Content fields (if scraped)
-    if include_content:
-        if hasattr(item, 'markdown'):
-            md = item.markdown
-            if no_links:
-                md = strip_links(md)
-            result['markdown'] = md
-        if hasattr(item, 'html'):
-            result['html'] = item.html
-        if hasattr(item, 'links'):
-            result['links'] = item.links
-        if hasattr(item, 'metadata'):
-            result['metadata'] = item.metadata.__dict__ if hasattr(item.metadata, '__dict__') else item.metadata
-
-    return result
+        for item in results:
+            print(item.get("url", ""))
