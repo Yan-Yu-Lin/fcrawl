@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from html import escape
 from typing import Any
 
 
@@ -50,18 +51,53 @@ def apply_inline_styles(text: str, style_ranges: list[dict]) -> str:
     # Track active styles at each character position
     styles_at: list[set[str]] = [set() for _ in range(n)]
 
+    style_aliases = {
+        "bold": "Bold",
+        "italic": "Italic",
+        "code": "Code",
+    }
+
     for sr in style_ranges:
         offset = sr.get("offset", 0)
         length = sr.get("length", 0)
-        style = sr.get("style", "")
+        raw_style = sr.get("style", "")
+        style = style_aliases.get(raw_style.strip().lower()) if isinstance(raw_style, str) else None
         if not style or offset < 0 or length <= 0:
             continue
         end = min(offset + length, n)
         for i in range(max(0, offset), end):
             styles_at[i].add(style)
 
-    # Group consecutive characters with identical style sets and wrap each group
     frozen_at = [frozenset(s) for s in styles_at]
+
+    # Mixed overlaps (multiple different styles on same character) can generate
+    # ambiguous Markdown delimiter runs like ***** between chunks. Use run-based
+    # inline HTML wrapping to preserve exact styling without corruption.
+    if any(len(s) > 1 for s in frozen_at):
+        parts: list[str] = []
+        i = 0
+        html_tags = {
+            "Bold": "strong",
+            "Italic": "em",
+            "Code": "code",
+        }
+        while i < n:
+            current = frozen_at[i]
+            j = i
+            while j < n and frozen_at[j] == current:
+                j += 1
+            chunk = escape(text[i:j], quote=False)
+            if "Code" in current:
+                chunk = f"<{html_tags['Code']}>{chunk}</{html_tags['Code']}>"
+            if "Italic" in current:
+                chunk = f"<{html_tags['Italic']}>{chunk}</{html_tags['Italic']}>"
+            if "Bold" in current:
+                chunk = f"<{html_tags['Bold']}>{chunk}</{html_tags['Bold']}>"
+            parts.append(chunk)
+            i = j
+        return "".join(parts)
+
+    # Group consecutive characters with identical style sets and wrap each group
     parts: list[str] = []
     i = 0
     while i < n:
