@@ -59,6 +59,7 @@ fcrawl csearch "python tutorials" -l 20
 DEFAULT_CONFIG = {
     'api_url': 'http://localhost:3002',  # Self-hosted Firecrawl
     'api_key': None,                      # Not required for localhost
+    'serper_api_key': None,               # For `search` command (Serper.dev)
     'default_format': 'markdown',
     'cache_enabled': False,
 }
@@ -69,12 +70,14 @@ DEFAULT_CONFIG = {
 1. Environment variables (highest priority):
    - `FIRECRAWL_API_URL`
    - `FIRECRAWL_API_KEY`
+   - `SERPER_API_KEY` (for `search` command)
 
 2. Config file: `.fcrawlrc` (current dir) or `~/.fcrawlrc`
    ```json
    {
      "api_url": "http://localhost:3002",
-     "api_key": "optional-key"
+     "api_key": "optional-key",
+     "serper_api_key": "optional-serper-key"
    }
    ```
 

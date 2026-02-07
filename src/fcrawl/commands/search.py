@@ -39,10 +39,11 @@ def _parse_locale(locale: Optional[str]) -> tuple[str, str]:
     if len(parts) > 1:
         region = (parts[1] or "").lower()
         if len(region) == 2 and region.isalpha():
+            # Standard two-letter country codes pass through (hk->hk, mo->mo, tw->tw)
             gl = region
-        elif region in {"hant", "tw", "hk", "mo"}:
+        elif region == "hant":
             gl = "tw"
-        elif region in {"hans", "cn", "sg"}:
+        elif region == "hans":
             gl = "cn"
 
     return gl, lang
@@ -65,6 +66,7 @@ def _serper_search(
     start = time.time()
     results: list[dict] = []
     seen_urls: set[str] = set()
+    requests_made = 0
     page = 1
 
     try:
@@ -86,6 +88,7 @@ def _serper_search(
                 json=payload,
                 timeout=30,
             )
+            requests_made += 1
 
             if response.status_code != 200:
                 elapsed = time.time() - start
@@ -93,7 +96,7 @@ def _serper_search(
                     [],
                     elapsed,
                     f"API error: {response.status_code} - {response.text[:120]}",
-                    page - 1,
+                    requests_made,
                     gl,
                     hl,
                 )
@@ -130,12 +133,11 @@ def _serper_search(
             page += 1
 
         elapsed = time.time() - start
-        pages_used = max(0, page - 1)
-        return results[:limit], elapsed, None, pages_used, gl, hl
+        return results[:limit], elapsed, None, requests_made, gl, hl
 
     except requests.RequestException as e:
         elapsed = time.time() - start
-        return [], elapsed, f"Request failed: {str(e)}", max(0, page - 1), gl, hl
+        return [], elapsed, f"Request failed: {str(e)}", requests_made, gl, hl
 
 
 def _display_debug_info(

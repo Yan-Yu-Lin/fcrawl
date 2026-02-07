@@ -137,6 +137,17 @@ fcrawl csearch "python tutorials"
 fcrawl search "machine learning papers" --json -o results.json
 ```
 
+> **Migrating from the old `search` command?** The previous Firecrawl-backed search
+> supported `--sources`, `--category`, `--tbs` (time filter), `--scrape`, `--no-links`,
+> and `--format`. These flags have been removed. Replacements:
+>
+> - **`--sources news`** / **`--category github`** — Use `site:` operators in the query
+>   (e.g., `fcrawl search "site:github.com web scraping"`)
+> - **`--tbs qdr:d`** — Serper doesn't expose a time filter; append time words to the
+>   query (e.g., `"AI news today"`) or use `csearch` which searches live SERPs.
+> - **`--scrape`** — Pipe search results into `fcrawl scrape`:
+>   `fcrawl search "query" --no-pretty | xargs -I{} fcrawl scrape {}`
+
 ### Extract Structured Data
 
 ```bash

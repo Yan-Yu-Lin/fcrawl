@@ -37,35 +37,50 @@ class Article:
 
 
 def apply_inline_styles(text: str, style_ranges: list[dict]) -> str:
-    """Apply inline styles (bold, italic) to text."""
-    if not style_ranges:
+    """Apply inline styles (bold, italic, code) to text.
+
+    Uses a character-level approach that correctly handles overlapping ranges.
+    Each character position tracks its active style set, then consecutive runs
+    with the same styles are grouped and wrapped together.
+    """
+    if not style_ranges or not text:
         return text
 
-    # Sort by offset descending so we can apply from end to start
-    # This prevents offset shifting issues
-    sorted_ranges = sorted(style_ranges, key=lambda x: x.get("offset", 0), reverse=True)
+    n = len(text)
+    # Track active styles at each character position
+    styles_at: list[set[str]] = [set() for _ in range(n)]
 
-    result = text
-    for style in sorted_ranges:
-        offset = style.get("offset", 0)
-        length = style.get("length", 0)
-        style_type = style.get("style", "")
-
-        if offset < 0 or offset + length > len(result):
+    for sr in style_ranges:
+        offset = sr.get("offset", 0)
+        length = sr.get("length", 0)
+        style = sr.get("style", "")
+        if not style or offset < 0 or length <= 0:
             continue
+        end = min(offset + length, n)
+        for i in range(max(0, offset), end):
+            styles_at[i].add(style)
 
-        styled_text = result[offset:offset + length]
+    # Group consecutive characters with identical style sets and wrap each group
+    frozen_at = [frozenset(s) for s in styles_at]
+    parts: list[str] = []
+    i = 0
+    while i < n:
+        current = frozen_at[i]
+        j = i
+        while j < n and frozen_at[j] == current:
+            j += 1
+        chunk = text[i:j]
+        # Apply markers: code innermost, then italic, then bold outermost
+        if "Code" in current:
+            chunk = f"`{chunk}`"
+        if "Italic" in current:
+            chunk = f"*{chunk}*"
+        if "Bold" in current:
+            chunk = f"**{chunk}**"
+        parts.append(chunk)
+        i = j
 
-        if style_type == "Bold":
-            styled_text = f"**{styled_text}**"
-        elif style_type == "Italic":
-            styled_text = f"*{styled_text}*"
-        elif style_type == "Code":
-            styled_text = f"`{styled_text}`"
-
-        result = result[:offset] + styled_text + result[offset + length:]
-
-    return result
+    return "".join(parts)
 
 
 def draftjs_to_markdown(blocks: list[dict], title: str | None = None) -> str:

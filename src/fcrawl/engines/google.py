@@ -6,7 +6,7 @@ import time
 from typing import Optional
 from urllib.parse import quote_plus
 
-from .base import SearchEngine, SearchResult, EngineStatus
+from .base import SearchEngine, SearchResult, EngineStatus, get_ua_for_os
 
 
 class GoogleEngine(SearchEngine):
@@ -162,7 +162,7 @@ class GoogleEngine(SearchEngine):
             "locale": locale or "en-US",
             "config": {
                 # Fix User-Agent bug in Camoufox v135 (Firefox/v135.0 -> Firefox/135.0)
-                "navigator.userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
+                "navigator.userAgent": get_ua_for_os(self.os_name),
                 "headers.Accept-Language": f"{locale or 'en-US'},{lang_code};q=0.9,en;q=0.8",
                 "locale:language": lang_code,
                 "locale:region": region_code,

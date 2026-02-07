@@ -17,7 +17,7 @@ from rich.table import Table
 from ..utils.output import handle_output, console
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..engines import get_engine, get_all_engines, ENGINES
-from ..engines.base import SearchResult, EngineStatus
+from ..engines.base import SearchResult, EngineStatus, get_ua_for_os
 from ..engines.aggregator import (
     aggregate_results,
     format_engines_badge,
@@ -123,7 +123,7 @@ async def _search_all_engines_async(
         "os": os_name,
         # Fix User-Agent bug in Camoufox v135 (Firefox/v135.0 -> Firefox/135.0)
         "config": {
-            "navigator.userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"
+            "navigator.userAgent": get_ua_for_os(os_name),
         },
     }
 

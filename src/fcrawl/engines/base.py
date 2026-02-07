@@ -9,6 +9,30 @@ import time
 import random
 
 
+# Firefox version used for Camoufox UA override (fix for v135 bug)
+_FIREFOX_VERSION = "135.0"
+
+# OS-specific User-Agent strings for Camoufox UA override.
+# Fixes Camoufox v135 bug where UA contains "Firefox/v135.0" instead of "Firefox/135.0".
+_UA_BY_OS: dict[str, str] = {
+    "macos": f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:{_FIREFOX_VERSION}) Gecko/20100101 Firefox/{_FIREFOX_VERSION}",
+    "windows": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{_FIREFOX_VERSION}) Gecko/20100101 Firefox/{_FIREFOX_VERSION}",
+    "linux": f"Mozilla/5.0 (X11; Linux x86_64; rv:{_FIREFOX_VERSION}) Gecko/20100101 Firefox/{_FIREFOX_VERSION}",
+}
+
+
+def get_ua_for_os(os_name: str | None = None) -> str:
+    """Return a Firefox User-Agent string matching the given OS name.
+
+    Args:
+        os_name: One of 'macos', 'windows', 'linux'. If None, auto-detects.
+    """
+    if os_name is None:
+        system = platform.system().lower()
+        os_name = "macos" if system == "darwin" else ("windows" if system == "windows" else "linux")
+    return _UA_BY_OS.get(os_name, _UA_BY_OS["linux"])
+
+
 @dataclass
 class SearchResult:
     """A single search result"""
@@ -316,7 +340,7 @@ class SearchEngine(ABC):
             "os": self.os_name,
             # Fix User-Agent bug in Camoufox v135 (Firefox/v135.0 -> Firefox/135.0)
             "config": {
-                "navigator.userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0"
+                "navigator.userAgent": get_ua_for_os(self.os_name),
             },
         }
         if locale:
