@@ -42,18 +42,21 @@ class YouTubeTranscriptDownloader:
     def _should_retry_with_cookies(self, err: BaseException) -> bool:
         if not self.cookies_on_fail or not self._has_cookies():
             return False
-        msg = str(err)
+
+        msg = str(err).lower()
         needles = [
-            "HTTP Error 429",
-            "Too Many Requests",
-            "Sign in to confirm",
+            "http error 429",
+            "too many requests",
+            "sign in to confirm",
             "not a bot",
             "captcha",
-            "Login required",
+            "login required",
+            "forbidden",
+            "http error 403",
         ]
         return any(n in msg for n in needles)
 
-    def _apply_cookie_opts(self, opts: dict) -> dict:
+    def _apply_cookie_opts(self, opts: dict[str, Any]) -> dict[str, Any]:
         """Mutate yt-dlp opts to include cookies, if configured."""
         if self.cookies_file:
             opts["cookiefile"] = self.cookies_file
@@ -64,6 +67,8 @@ class YouTubeTranscriptDownloader:
             # For advanced formats (profiles/containers), users should prefer a cookiefile.
             parts = self.cookies_from_browser.split(":", 1)
             browser = parts[0].strip()
+            if not browser:
+                return opts
             if len(parts) == 2 and parts[1].strip():
                 profile = parts[1].strip()
                 opts["cookiesfrombrowser"] = (browser, profile)
@@ -169,6 +174,7 @@ class YouTubeTranscriptDownloader:
             return build_result(info)
         except yt_dlp.utils.DownloadError as e:
             if self._should_retry_with_cookies(e):
+                self.log("Retrying metadata fetch with cookies...")
                 try:
                     info = self._extract_info(video_url, use_cookies=True)
                     return build_result(info)
@@ -265,6 +271,7 @@ class YouTubeTranscriptDownloader:
             )
         except yt_dlp.utils.DownloadError as e:
             if self._should_retry_with_cookies(e):
+                self.log("Retrying transcript download with cookies...")
                 try:
                     return to_result(
                         self._download_subtitles(
@@ -396,6 +403,23 @@ def yt_transcript(
     cfg = load_config()
     cookies_file = cookies or cfg.get("yt_cookies_file")
     cookies_browser = cookies_from_browser or cfg.get("yt_cookies_from_browser")
+
+    if cookies_file and not os.path.exists(cookies_file):
+        # If the user provided cookies explicitly, fail fast.
+        if cookies:
+            raise click.BadParameter(
+                f"cookie file not found: {cookies_file}", param_hint="--cookies"
+            )
+
+        # If cookies came from config/env, just warn and continue.
+        console.print(
+            f"[dim]Configured yt_cookies_file not found, ignoring: {cookies_file}[/dim]",
+            highlight=False,
+        )
+        cookies_file = None
+
+    if cookies_browser is not None and not str(cookies_browser).strip():
+        cookies_browser = None
 
     downloader = YouTubeTranscriptDownloader(
         quiet=quiet or json_output,
