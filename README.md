@@ -5,11 +5,9 @@ A powerful command-line interface for Firecrawl, making web scraping as easy as 
 ## Features
 
 - 🚀 **Simple by default** - Just run `fcrawl scrape URL` to get markdown content
-- 🔍 **Web search** - Search the web with Google/Bing/DuckDuckGo (via SearXNG)
+- 🔍 **Web search** - Fast Google search via Serper (`search`) plus multi-engine browser search (`csearch`)
 - 📦 **Multiple formats** - Markdown, HTML, links, screenshots, and structured data
 - 🔄 **Batch operations** - Crawl entire websites or map site structures
-- 🎯 **Category filters** - Search GitHub repos, research papers, or general web
-- ⏰ **Time filters** - Search by date range (past hour/day/week/month/year)
 - 📋 **Clipboard support** - Copy results directly to clipboard
 - 🎨 **Beautiful output** - Syntax highlighting and formatted tables in terminal
 - 💾 **Flexible saving** - Save to files or pipe to other tools
@@ -75,6 +73,44 @@ fcrawl scrape https://example.com --copy
 fcrawl scrape https://example.com -f markdown -f links
 ```
 
+### YouTube Transcripts
+
+```bash
+# Download a transcript
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Pick a language
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" -l en
+
+# List available languages (metadata only; does not download subs)
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --list-langs
+```
+
+If YouTube rate-limits unauthenticated requests (HTTP 429), you can provide cookies:
+
+```bash
+# Load cookies from your local browser (recommended)
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --cookies-from-browser chrome
+
+# Or use a Netscape cookie file
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --cookies "$HOME/Downloads/youtube-cookies.txt"
+```
+
+You can also set defaults via `~/.fcrawlrc`:
+
+```json
+{
+  "yt_cookies_from_browser": "chrome"
+}
+```
+
+Or environment variables:
+
+```bash
+export FCRAWL_YT_COOKIES_FROM_BROWSER=chrome
+export FCRAWL_YT_COOKIES_FILE="$HOME/Downloads/youtube-cookies.txt"
+```
+
 ### JSON Output (for scripts)
 
 ```bash
@@ -120,28 +156,35 @@ fcrawl map https://site.com --limit 100
 ### Searching the Web
 
 ```bash
-# Basic search
+# Fast Google search (Serper API)
 fcrawl search "python tutorials"
 
-# Search specific sources
-fcrawl search "AI news" --sources news --limit 10
-fcrawl search "ML articles" --sources web --sources news
+# More results
+fcrawl search "AI news" --limit 30
 
-# Search with category filters
-fcrawl search "web scraping python" --category github
-fcrawl search "machine learning papers" --category research
+# Locale and region
+fcrawl search "restaurants" -L zh-TW
 
-# Time-based search
-fcrawl search "latest AI news" --tbs qdr:d  # past day
-fcrawl search "weekly tech news" --tbs qdr:w  # past week
-
-# Search and scrape results
-fcrawl search "python documentation" --scrape -f markdown
-fcrawl search "tutorials" --scrape -f markdown -o results.json
-
-# Location-based search
+# Location bias
 fcrawl search "coffee shops" --location "New York"
+
+# Multi-engine browser search (Camoufox)
+fcrawl csearch "python tutorials"
+
+# Save as JSON
+fcrawl search "machine learning papers" --json -o results.json
 ```
+
+> **Migrating from the old `search` command?** The previous Firecrawl-backed search
+> supported `--sources`, `--category`, `--tbs` (time filter), `--scrape`, `--no-links`,
+> and `--format`. These flags have been removed. Replacements:
+>
+> - **`--sources news`** / **`--category github`** — Use `site:` operators in the query
+>   (e.g., `fcrawl search "site:github.com web scraping"`)
+> - **`--tbs qdr:d`** — Serper doesn't expose a time filter; append time words to the
+>   query (e.g., `"AI news today"`) or use `csearch` which searches live SERPs.
+> - **`--scrape`** — Pipe search results into `fcrawl scrape`:
+>   `fcrawl search "query" --no-pretty | xargs -I{} fcrawl scrape {}`
 
 ### Extract Structured Data
 
@@ -208,16 +251,16 @@ fcrawl crawl https://news.ycombinator.com --limit 30 -o hn-today.json
 ### Research Assistant
 ```bash
 # Find latest AI research papers
-fcrawl search "large language models" --category research --limit 20 -o ai-research.json
+fcrawl search "large language models arxiv" --limit 20 -o ai-research.json
 
 # Find GitHub repos
-fcrawl search "web scraping python" --category github --limit 10
+fcrawl search "site:github.com web scraping python" --limit 10
 ```
 
 ### News Aggregator
 ```bash
 # Get today's tech news
-fcrawl search "AI breakthrough" --sources news --tbs qdr:d --scrape -o news-today.json
+fcrawl search "AI breakthrough" --limit 20 -o news-today.json
 ```
 
 ### Documentation Lookup

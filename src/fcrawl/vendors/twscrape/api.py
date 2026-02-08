@@ -152,11 +152,13 @@ class API:
 
                 yield rep
 
-    async def _gql_item(self, op: str, kv: dict, ft: dict | None = None):
+    async def _gql_item(self, op: str, kv: dict, ft: dict | None = None, field_toggles: dict | None = None):
         ft = ft or {}
         queue = op.split("/")[-1]
         async with QueueClient(self.pool, queue, self.debug, proxy=self.proxy) as client:
             params = {"variables": {**kv}, "features": {**GQL_FEATURES, **ft}}
+            if field_toggles:
+                params["fieldToggles"] = field_toggles
             return await client.get(f"{GQL_URL}/{op}", params=encode_params(params))
 
     # search
@@ -244,11 +246,22 @@ class API:
             "withV2Timeline": True,
             **(kv or {}),
         }
-        return await self._gql_item(op, kv)
+        field_toggles = {"withArticleRichContentState": True}
+        return await self._gql_item(op, kv, field_toggles=field_toggles)
 
     async def tweet_details(self, twid: int, kv: KV = None) -> Tweet | None:
         rep = await self.tweet_details_raw(twid, kv=kv)
         return parse_tweet(rep, twid) if rep else None
+
+    # tweet_with_article (for fetching full article content)
+
+    async def tweet_with_article_raw(self, twid: int, kv: KV = None):
+        """Fetch tweet with full article content if present.
+
+        Delegates to tweet_details_raw which already requests
+        withArticleRichContentState=True.
+        """
+        return await self.tweet_details_raw(twid, kv=kv)
 
     # tweet_replies
     # note: uses same op as tweet_details, see: https://github.com/vladkens/twscrape/issues/104

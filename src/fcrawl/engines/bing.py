@@ -1,12 +1,13 @@
 """Bing search engine implementation"""
 
+import asyncio
 import base64
 import random
 import time
 from typing import Optional
 from urllib.parse import quote_plus, urlparse, parse_qs
 
-from .base import SearchEngine, SearchResult, EngineStatus
+from .base import SearchEngine, SearchResult, EngineStatus, get_ua_for_os
 
 
 class BingEngine(SearchEngine):
@@ -78,20 +79,132 @@ class BingEngine(SearchEngine):
             url += f"&cc={parts[1]}"
         return url
 
-    def search(self, query: str, limit: int, headless: bool = True,
-               locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
-        """
-        Perform Bing search with proper locale/cookie handling.
+    def get_context_options(self, locale: Optional[str] = None) -> dict:
+        """Return context options with Bing-specific headers"""
+        lang_code = "en"
+        if locale:
+            lang_code = locale.split("-")[0]
+        return {
+            "locale": locale or "en-US",
+            "extra_http_headers": {
+                "Accept-Language": f"{locale or 'en-US'},{lang_code};q=0.9,en;q=0.8"
+            }
+        }
 
-        Bing uses IP geolocation to determine search results language. To override this,
-        we need to set cookies AND headers AND URL parameters together.
-        """
-        from camoufox.sync_api import Camoufox
+    def setup_context(self, context, locale: Optional[str] = None) -> None:
+        """Set Bing-specific cookies for locale/session handling"""
+        # Generate new cvid for this context
+        self._cvid = self._generate_cvid()
 
+        lang_code = "en"
+        if locale:
+            lang_code = locale.split("-")[0]
+
+        bing_cookies = [
+            {
+                "name": "_EDGE_S",
+                "value": f"mkt={locale or 'en-US'}&ui={lang_code}",
+                "domain": ".bing.com",
+                "path": "/"
+            },
+            {
+                "name": "SRCHHPGUSR",
+                "value": f"SRCHLANG={lang_code}&IG={self._cvid}&SRCHMKT={locale or 'en-US'}",
+                "domain": ".bing.com",
+                "path": "/"
+            },
+            {
+                "name": "_EDGE_CD",
+                "value": f"m={locale or 'en-US'}&u={lang_code}",
+                "domain": ".bing.com",
+                "path": "/"
+            }
+        ]
+        context.add_cookies(bing_cookies)
+
+    def search_with_page(self, page, query: str, limit: int,
+                         locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Search using a provided page (context already set up).
+        Bing-specific: visits homepage first, waits for JS rendering.
+        """
         start_time = time.time()
         results = []
         seen_urls = set()
         max_pages = (limit // self.results_per_page) + 1
+
+        try:
+            # Visit Bing homepage first to initialize session/cookies properly
+            page.goto("https://www.bing.com/", wait_until="domcontentloaded")
+            time.sleep(random.uniform(0.5, 1.0))
+            self.handle_consent(page)
+
+            for page_num in range(max_pages):
+                if len(results) >= limit:
+                    break
+
+                # Build URL and navigate
+                search_url = self.build_search_url(query, page_num)
+                if locale:
+                    search_url = self._add_locale_params(search_url, locale)
+
+                page.goto(search_url, wait_until="domcontentloaded")
+
+                # Handle consent popup on first page
+                if page_num == 0:
+                    self.handle_consent(page)
+
+                # Wait for search results to render (Bing uses JS)
+                try:
+                    page.wait_for_selector("li.b_algo", timeout=5000)
+                except Exception:
+                    pass
+
+                # Small random delay to appear human
+                time.sleep(random.uniform(0.3, 0.8))
+
+                # Extract results
+                page_results = self.extract_results(page)
+
+                # No more results
+                if not page_results:
+                    break
+
+                # Add unique results with position
+                for r in page_results:
+                    if r.url not in seen_urls:
+                        seen_urls.add(r.url)
+                        r.position = len(results) + 1
+                        results.append(r)
+                        if len(results) >= limit:
+                            break
+
+                # Delay between pages
+                if page_num < max_pages - 1 and len(results) < limit:
+                    time.sleep(random.uniform(1.0, 2.0))
+
+            elapsed = time.time() - start_time
+            return results[:limit], EngineStatus(
+                engine=self.name, success=True,
+                result_count=len(results), elapsed_time=elapsed
+            )
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            return [], EngineStatus(
+                engine=self.name, success=False,
+                result_count=0, elapsed_time=elapsed, error=str(e)
+            )
+
+    def search(self, query: str, limit: int, headless: bool = True,
+               locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Perform Bing search with proper locale/cookie handling.
+        Creates its own browser - use search_with_page() for shared browser.
+        """
+        from camoufox.sync_api import Camoufox
+
+        start_time = time.time()
 
         # Generate new cvid for this search session
         self._cvid = self._generate_cvid()
@@ -114,9 +227,9 @@ class BingEngine(SearchEngine):
             "os": self.os_name,
             "locale": locale or "en-US",
             "config": {
-                # Set Accept-Language header explicitly
+                # Fix User-Agent bug in Camoufox v135 (Firefox/v135.0 -> Firefox/135.0)
+                "navigator.userAgent": get_ua_for_os(self.os_name),
                 "headers.Accept-Language": f"{locale or 'en-US'},{lang_code};q=0.9,en;q=0.8",
-                # Set browser locale
                 "locale:language": lang_code,
                 "locale:region": region_code,
             }
@@ -124,103 +237,29 @@ class BingEngine(SearchEngine):
 
         try:
             with Camoufox(**camoufox_opts) as browser:
-                page = browser.new_page()
+                # Create context with Bing-specific options
+                context_opts = self.get_context_options(locale)
+                context = browser.new_context(**context_opts)
 
-                # Set Bing-specific cookies before navigation
-                # These cookies help tell Bing what language/market to use
-                bing_cookies = [
-                    {
-                        "name": "_EDGE_S",
-                        "value": f"mkt={locale or 'en-US'}&ui={lang_code}",
-                        "domain": ".bing.com",
-                        "path": "/"
-                    },
-                    {
-                        "name": "SRCHHPGUSR",
-                        "value": f"SRCHLANG={lang_code}&IG={self._cvid}&SRCHMKT={locale or 'en-US'}",
-                        "domain": ".bing.com",
-                        "path": "/"
-                    },
-                    {
-                        "name": "_EDGE_CD",
-                        "value": f"m={locale or 'en-US'}&u={lang_code}",
-                        "domain": ".bing.com",
-                        "path": "/"
-                    }
-                ]
-                page.context.add_cookies(bing_cookies)
+                # Set up Bing cookies
+                self.setup_context(context, locale)
 
-                # Visit Bing homepage first to initialize session/cookies properly
-                # This mimics real user behavior and helps with locale detection
-                page.goto("https://www.bing.com/", wait_until="domcontentloaded")
-                time.sleep(random.uniform(0.5, 1.0))
-                self.handle_consent(page)
+                # Create page and run search
+                page = context.new_page()
+                results, status = self.search_with_page(page, query, limit, locale)
 
-                for page_num in range(max_pages):
-                    if len(results) >= limit:
-                        break
+                # Adjust timing to include browser setup
+                elapsed = time.time() - start_time
+                status.elapsed_time = elapsed
 
-                    # Build URL and navigate
-                    search_url = self.build_search_url(query, page_num)
-                    if locale:
-                        search_url = self._add_locale_params(search_url, locale)
-
-                    page.goto(search_url, wait_until="domcontentloaded")
-
-                    # Handle consent popup on first page
-                    if page_num == 0:
-                        self.handle_consent(page)
-
-                    # Wait for search results to render (Bing uses JS)
-                    # This is critical - domcontentloaded fires before JS finishes
-                    try:
-                        page.wait_for_selector("li.b_algo", timeout=5000)
-                    except Exception:
-                        # Results might not exist, or different page structure
-                        pass
-
-                    # Small random delay to appear human
-                    time.sleep(random.uniform(0.3, 0.8))
-
-                    # Extract results
-                    page_results = self.extract_results(page)
-
-                    # No more results
-                    if not page_results:
-                        break
-
-                    # Add unique results with position
-                    for r in page_results:
-                        if r.url not in seen_urls:
-                            seen_urls.add(r.url)
-                            r.position = len(results) + 1
-                            results.append(r)
-                            if len(results) >= limit:
-                                break
-
-                    # Delay between pages
-                    if page_num < max_pages - 1 and len(results) < limit:
-                        time.sleep(random.uniform(1.0, 2.0))
-
-            elapsed = time.time() - start_time
-            status = EngineStatus(
-                engine=self.name,
-                success=True,
-                result_count=len(results),
-                elapsed_time=elapsed
-            )
-            return results[:limit], status
+                return results, status
 
         except Exception as e:
             elapsed = time.time() - start_time
-            status = EngineStatus(
-                engine=self.name,
-                success=False,
-                result_count=0,
-                elapsed_time=elapsed,
-                error=str(e)
+            return [], EngineStatus(
+                engine=self.name, success=False,
+                result_count=0, elapsed_time=elapsed, error=str(e)
             )
-            return [], status
 
     def handle_consent(self, page) -> None:
         """Handle Bing cookie consent popup"""
@@ -302,6 +341,177 @@ class BingEngine(SearchEngine):
                     desc_elem = elem.locator(desc_selector).first
                     if desc_elem.count() > 0:
                         description = desc_elem.text_content() or ""
+                        if description:
+                            break
+
+                # Only add if we have a valid URL
+                if url and url.startswith("http"):
+                    results.append(SearchResult(
+                        title=title.strip() if title else "",
+                        url=url,
+                        description=description.strip() if description else "",
+                        engine=self.name,
+                        position=len(results) + 1
+                    ))
+            except Exception:
+                continue
+
+        return results
+
+    async def setup_context_async(self, context, locale: Optional[str] = None) -> None:
+        """Async version: Set Bing-specific cookies for locale/session handling"""
+        # Generate new cvid for this context
+        self._cvid = self._generate_cvid()
+
+        lang_code = "en"
+        if locale:
+            lang_code = locale.split("-")[0]
+
+        bing_cookies = [
+            {
+                "name": "_EDGE_S",
+                "value": f"mkt={locale or 'en-US'}&ui={lang_code}",
+                "domain": ".bing.com",
+                "path": "/"
+            },
+            {
+                "name": "SRCHHPGUSR",
+                "value": f"SRCHLANG={lang_code}&IG={self._cvid}&SRCHMKT={locale or 'en-US'}",
+                "domain": ".bing.com",
+                "path": "/"
+            },
+            {
+                "name": "_EDGE_CD",
+                "value": f"m={locale or 'en-US'}&u={lang_code}",
+                "domain": ".bing.com",
+                "path": "/"
+            }
+        ]
+        await context.add_cookies(bing_cookies)
+
+    async def handle_consent_async(self, page) -> None:
+        """Async version: Handle Bing cookie consent popup"""
+        try:
+            for selector in [
+                "button#bnp_btn_accept",
+                "button:has-text('Accept')",
+                "button:has-text('Agree')",
+                "#bnp_container button",
+            ]:
+                consent = page.locator(selector).first
+                if await consent.is_visible(timeout=1000):
+                    await consent.click()
+                    await asyncio.sleep(0.5)
+                    break
+        except Exception:
+            pass
+
+    async def search_with_page_async(self, page, query: str, limit: int,
+                                     locale: Optional[str] = None) -> tuple[list[SearchResult], EngineStatus]:
+        """
+        Async version: Search using a provided page (context already set up).
+        Bing-specific: visits homepage first, waits for JS rendering.
+        """
+        start_time = time.time()
+        results = []
+        seen_urls = set()
+        max_pages = (limit // self.results_per_page) + 1
+
+        try:
+            # Visit Bing homepage first to initialize session/cookies properly
+            await page.goto("https://www.bing.com/", wait_until="domcontentloaded")
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            await self.handle_consent_async(page)
+
+            for page_num in range(max_pages):
+                if len(results) >= limit:
+                    break
+
+                # Build URL and navigate
+                search_url = self.build_search_url(query, page_num)
+                if locale:
+                    search_url = self._add_locale_params(search_url, locale)
+
+                await page.goto(search_url, wait_until="domcontentloaded")
+
+                # Handle consent popup on first page
+                if page_num == 0:
+                    await self.handle_consent_async(page)
+
+                # Wait for search results to render (Bing uses JS)
+                try:
+                    await page.wait_for_selector("li.b_algo", timeout=5000)
+                except Exception:
+                    pass
+
+                # Small random delay to appear human
+                await asyncio.sleep(random.uniform(0.3, 0.8))
+
+                # Extract results
+                page_results = await self.extract_results_async(page)
+
+                # No more results
+                if not page_results:
+                    break
+
+                # Add unique results with position
+                for r in page_results:
+                    if r.url not in seen_urls:
+                        seen_urls.add(r.url)
+                        r.position = len(results) + 1
+                        results.append(r)
+                        if len(results) >= limit:
+                            break
+
+                # Delay between pages
+                if page_num < max_pages - 1 and len(results) < limit:
+                    await asyncio.sleep(random.uniform(1.0, 2.0))
+
+            elapsed = time.time() - start_time
+            return results[:limit], EngineStatus(
+                engine=self.name, success=True,
+                result_count=len(results), elapsed_time=elapsed
+            )
+
+        except Exception as e:
+            elapsed = time.time() - start_time
+            return [], EngineStatus(
+                engine=self.name, success=False,
+                result_count=0, elapsed_time=elapsed, error=str(e)
+            )
+
+    async def extract_results_async(self, page) -> list[SearchResult]:
+        """Async version: Extract search results from Bing SERP"""
+        results = []
+
+        # Bing's result structure: li.b_algo contains each result
+        result_containers = await page.locator("li.b_algo").all()
+
+        for elem in result_containers:
+            try:
+                # Title and URL from h2 > a
+                title_link = elem.locator("h2 a").first
+                title = ""
+                url = ""
+
+                if await title_link.count() > 0:
+                    title = await title_link.text_content() or ""
+                    raw_url = await title_link.get_attribute("href") or ""
+                    # Decode Bing tracking URL
+                    url = self._decode_bing_url(raw_url)
+
+                # Description from caption paragraph
+                description = ""
+                # Try various Bing description selectors
+                for desc_selector in [
+                    "div.b_caption p",
+                    "p.b_lineclamp2",
+                    "p.b_algoSlug",
+                    "div.b_caption",
+                ]:
+                    desc_elem = elem.locator(desc_selector).first
+                    if await desc_elem.count() > 0:
+                        description = await desc_elem.text_content() or ""
                         if description:
                             break
 

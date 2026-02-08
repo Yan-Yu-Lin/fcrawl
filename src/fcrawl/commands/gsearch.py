@@ -9,6 +9,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from typing import Optional
 from urllib.parse import quote_plus
 
+from ..engines.base import get_ua_for_os
 from ..utils.output import handle_output, console
 from ..utils.cache import cache_key, read_cache, write_cache
 
@@ -140,6 +141,10 @@ def _google_search(query: str, limit: int, headless: bool, locale: Optional[str]
         "block_images": True,
         "i_know_what_im_doing": True,
         "os": _get_os_name(),
+        # Fix User-Agent bug in Camoufox v135 (Firefox/v135.0 -> Firefox/135.0)
+        "config": {
+            "navigator.userAgent": get_ua_for_os(_get_os_name()),
+        },
     }
     if locale:
         camoufox_opts["locale"] = locale
