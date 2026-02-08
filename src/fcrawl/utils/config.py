@@ -3,9 +3,12 @@
 import os
 import json
 from pathlib import Path
-from typing import Dict, Any, Optional
-from firecrawl import Firecrawl
+from typing import Dict, Any, Optional, TYPE_CHECKING
+
 from dotenv import load_dotenv
+
+if TYPE_CHECKING:
+    from firecrawl import Firecrawl
 
 # Load environment variables
 load_dotenv()
@@ -52,6 +55,13 @@ def load_config() -> Dict[str, Any]:
     if os.getenv("FIRECRAWL_API_KEY"):
         config["api_key"] = os.getenv("FIRECRAWL_API_KEY")
 
+    # Optional: YouTube transcript helpers (used by yt-dlp)
+    # These are intentionally generic and only used if referenced by commands.
+    if os.getenv("FCRAWL_YT_COOKIES_FILE"):
+        config["yt_cookies_file"] = os.getenv("FCRAWL_YT_COOKIES_FILE")
+    if os.getenv("FCRAWL_YT_COOKIES_FROM_BROWSER"):
+        config["yt_cookies_from_browser"] = os.getenv("FCRAWL_YT_COOKIES_FROM_BROWSER")
+
     return config
 
 
@@ -62,8 +72,12 @@ def save_config(config: Dict[str, Any], path: Optional[Path] = None):
         json.dump(config, f, indent=2)
 
 
-def get_firecrawl_client() -> Firecrawl:
+def get_firecrawl_client() -> "Firecrawl":
     """Get a configured Firecrawl client"""
+    # Import lazily so commands that only need load_config()
+    # (e.g. yt-transcript) don't pay the import cost.
+    from firecrawl import Firecrawl
+
     config = load_config()
 
     # For local instances, use a dummy API key if none is set

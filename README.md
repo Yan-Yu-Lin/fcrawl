@@ -73,6 +73,44 @@ fcrawl scrape https://example.com --copy
 fcrawl scrape https://example.com -f markdown -f links
 ```
 
+### YouTube Transcripts
+
+```bash
+# Download a transcript
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Pick a language
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" -l en
+
+# List available languages (metadata only; does not download subs)
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --list-langs
+```
+
+If YouTube rate-limits unauthenticated requests (HTTP 429), you can provide cookies:
+
+```bash
+# Load cookies from your local browser (recommended)
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --cookies-from-browser chrome
+
+# Or use a Netscape cookie file
+fcrawl yt-transcript "https://www.youtube.com/watch?v=VIDEO_ID" --cookies "$HOME/Downloads/youtube-cookies.txt"
+```
+
+You can also set defaults via `~/.fcrawlrc`:
+
+```json
+{
+  "yt_cookies_from_browser": "chrome"
+}
+```
+
+Or environment variables:
+
+```bash
+export FCRAWL_YT_COOKIES_FROM_BROWSER=chrome
+export FCRAWL_YT_COOKIES_FILE="$HOME/Downloads/youtube-cookies.txt"
+```
+
 ### JSON Output (for scripts)
 
 ```bash

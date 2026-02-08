@@ -71,13 +71,17 @@ DEFAULT_CONFIG = {
    - `FIRECRAWL_API_URL`
    - `FIRECRAWL_API_KEY`
    - `SERPER_API_KEY` (for `search` command)
+   - `FCRAWL_YT_COOKIES_FILE` (for `yt-transcript`, Netscape cookies.txt)
+   - `FCRAWL_YT_COOKIES_FROM_BROWSER` (for `yt-transcript`, e.g. `chrome`)
 
 2. Config file: `.fcrawlrc` (current dir) or `~/.fcrawlrc`
    ```json
    {
      "api_url": "http://localhost:3002",
      "api_key": "optional-key",
-     "serper_api_key": "optional-serper-key"
+     "serper_api_key": "optional-serper-key",
+     "yt_cookies_file": "optional-netscape-cookies.txt",
+     "yt_cookies_from_browser": "chrome"
    }
    ```
 
