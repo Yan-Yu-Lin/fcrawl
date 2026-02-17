@@ -17,7 +17,6 @@ import click
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from ..utils.output import handle_output, console
-from ..utils.transcriber import SenseVoiceTranscriber
 
 
 def format_duration(seconds: float) -> str:
@@ -142,7 +141,8 @@ def transcribe(
     is_tty = sys.stdout.isatty()
     show_progress = is_tty and not quiet and not json_output
 
-    # Initialize transcriber
+    # Initialize transcriber (lazy import to avoid loading heavy deps on every fcrawl invocation)
+    from ..utils.transcriber import SenseVoiceTranscriber
     transcriber = SenseVoiceTranscriber(
         model=model,
         quiet=quiet or json_output,

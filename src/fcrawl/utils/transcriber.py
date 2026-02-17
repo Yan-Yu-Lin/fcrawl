@@ -14,9 +14,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from opencc import OpenCC
-from pydub import AudioSegment
-
 from .output import console
 
 
@@ -45,6 +42,7 @@ def clean_transcript(text: str) -> str:
 
 def convert_to_traditional(text: str) -> str:
     """Convert Simplified Chinese to Traditional Chinese using OpenCC."""
+    from opencc import OpenCC
     converter = OpenCC('s2t')
     return converter.convert(text)
 
@@ -63,6 +61,7 @@ def convert_to_wav_16k(input_path: str, output_dir: Optional[str] = None) -> str
     input_path_obj = Path(input_path)
 
     # Load audio (pydub handles most formats via ffmpeg)
+    from pydub import AudioSegment
     audio = AudioSegment.from_file(str(input_path_obj))
 
     # Convert to 16kHz mono
@@ -263,6 +262,7 @@ class SenseVoiceTranscriber:
                 audio_path = temp_wav
             else:
                 # Check if already 16kHz mono
+                from pydub import AudioSegment
                 audio = AudioSegment.from_wav(str(input_path_obj))
                 if audio.frame_rate != 16000 or audio.channels != 1:
                     self.log("Resampling to 16kHz mono...")
@@ -272,6 +272,7 @@ class SenseVoiceTranscriber:
                     audio_path = str(input_path_obj)
 
             # Get duration
+            from pydub import AudioSegment
             audio = AudioSegment.from_file(audio_path)
             duration = len(audio) / 1000.0
 
