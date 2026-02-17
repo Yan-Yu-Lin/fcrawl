@@ -1,8 +1,8 @@
 # fcrawl
 
-A CLI tool that gives AI coding agents (Claude Code, etc.) the ability to interact with the web — scraping pages, searching Google, reading YouTube videos, browsing X/Twitter, and transcribing audio. Built on top of a self-hosted [Firecrawl](https://github.com/mendableai/firecrawl) instance.
+A CLI tool that gives AI coding agents (Claude Code, etc.) the ability to interact with the web — scraping pages, searching Google, reading YouTube videos, browsing Reddit and X/Twitter, and transcribing audio. Built on top of a self-hosted [Firecrawl](https://github.com/mendableai/firecrawl) instance.
 
-Designed to replace built-in web tools (WebSearch, WebFetch, Firecrawl MCP) with something simpler, more reliable, and far more capable. An AI agent with `fcrawl` in its Bash tool can scrape any page, search the web, "watch" YouTube videos via transcripts, read tweets and threads, and transcribe audio files — all through one consistent CLI.
+Designed to replace built-in web tools (WebSearch, WebFetch, Firecrawl MCP) with something simpler, more reliable, and far more capable. An AI agent with `fcrawl` in its Bash tool can scrape any page, search the web, "watch" YouTube videos via transcripts, research Reddit threads, read tweets and threads, and transcribe audio files — all through one consistent CLI.
 
 ## For AI agents
 
@@ -396,6 +396,115 @@ Auto-detects MPS (Apple Silicon), CUDA, or CPU.
 
 ---
 
+### `reddit` — Reddit research workflow
+
+Read Reddit with no auth using Reddit's public `.json` endpoints.
+
+#### `reddit search`
+
+```bash
+fcrawl reddit search <query> [options]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--subreddit` | `-s` | Restrict to one subreddit |
+| `--user` | `-u` | Restrict to posts by a specific author |
+| `--sort` | | Sort: `relevance`, `hot`, `top`, `new`, `comments` |
+| `--time` | `-t` | Time filter: `hour`, `day`, `week`, `month`, `year`, `all` |
+| `--limit` | `-l` | Max results (default: 20, max: 100) |
+| `--after` | | Pagination cursor from previous response |
+| `--output` | `-o` | Save output to file |
+| `--json` | | Output as JSON |
+| `--pretty/--no-pretty` | | Pretty terminal output |
+| `--no-cache` | | Bypass cache |
+| `--cache-only` | | Only return cached results |
+
+```bash
+fcrawl reddit search "claude code"
+fcrawl reddit search "mcp" -s Python -l 10
+fcrawl reddit search "agent tooling" -u spez --sort top --time month
+```
+
+#### `reddit post`
+
+```bash
+fcrawl reddit post <url_or_id> [options]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--sort` | | Comment sort: `best`, `top`, `new`, `controversial`, `old`, `qa` |
+| `--limit` | `-l` | Max top-level comments (default: 20, `0` = all) |
+| `--depth` | `-d` | Max reply depth (default: 3) |
+| `--no-comments` | | Fetch post only |
+| `--output` | `-o` | Save output to file |
+| `--json` | | Output as JSON |
+| `--pretty/--no-pretty` | | Pretty terminal output |
+| `--no-cache` | | Bypass cache |
+| `--cache-only` | | Only return cached results |
+
+```bash
+fcrawl reddit post https://reddit.com/r/python/comments/abc123/post-title/
+fcrawl reddit post abc123 --sort top --limit 5
+fcrawl reddit post abc123 --no-comments
+```
+
+#### `reddit subreddit`
+
+```bash
+fcrawl reddit subreddit <name> [options]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--sort` | | Feed sort: `hot`, `new`, `top`, `rising` |
+| `--time` | `-t` | Time filter for `--sort top` |
+| `--limit` | `-l` | Max posts (default: 20, max: 100) |
+| `--after` | | Pagination cursor from previous response |
+| `--about` | | Show subreddit metadata instead of feed |
+| `--output` | `-o` | Save output to file |
+| `--json` | | Output as JSON |
+| `--pretty/--no-pretty` | | Pretty terminal output |
+| `--no-cache` | | Bypass cache |
+| `--cache-only` | | Only return cached results |
+
+```bash
+fcrawl reddit subreddit python
+fcrawl reddit subreddit r/Python --sort top --time week
+fcrawl reddit subreddit python --about
+```
+
+#### `reddit user`
+
+```bash
+fcrawl reddit user <username> [options]
+```
+
+| Option | Description |
+|--------|-------------|
+| `--about` | Show profile info only |
+| `--posts-only` | Show only submitted posts |
+| `--comments-only` | Show only comments |
+| `--type` | Activity type: `overview`, `submitted`, `comments` |
+| `--sort` | Sort: `hot`, `new`, `top`, `controversial` |
+| `--time`, `-t` | Time filter for `--sort top` |
+| `--limit`, `-l` | Max items (default: 20, max: 100) |
+| `--after` | Pagination cursor from previous response |
+| `--output`, `-o` | Save output to file |
+| `--json` | Output as JSON |
+| `--pretty/--no-pretty` | Pretty terminal output |
+| `--no-cache` | Bypass cache |
+| `--cache-only` | Only return cached results |
+
+```bash
+fcrawl reddit user spez
+fcrawl reddit user u/spez --posts-only --sort top
+fcrawl reddit user spez --comments-only -l 50
+```
+
+---
+
 ### `x` — X/Twitter
 
 Search tweets, fetch profiles, read threads, and manage accounts. Uses a vendored [twscrape](https://github.com/vladkens/twscrape) library with SQLite-backed account management.
@@ -511,7 +620,7 @@ Shows all active config values and their sources.
 
 fcrawl caches API responses in `/tmp/fcrawl-cache/` as JSON files, keyed by a SHA-256 hash of the URL/query + options.
 
-Commands with caching: `scrape`, `crawl`, `search`, `csearch`, `gsearch`.
+Commands with caching: `scrape`, `crawl`, `search`, `csearch`, `gsearch`, `reddit`.
 
 | Flag | Effect |
 |------|--------|
@@ -570,6 +679,7 @@ fcrawl/
 │   │   ├── search.py               # Serper.dev search
 │   │   ├── csearch.py              # Multi-engine browser search
 │   │   ├── gsearch.py              # Google browser search
+│   │   ├── reddit.py               # Reddit commands (search/post/subreddit/user)
 │   │   ├── x.py                    # X/Twitter commands
 │   │   ├── yt_transcript.py        # YouTube transcripts
 │   │   ├── yt_channel.py           # YouTube channel explorer
@@ -578,6 +688,7 @@ fcrawl/
 │   │   ├── config.py               # Config loading, Firecrawl client
 │   │   ├── output.py               # Display, save, clipboard
 │   │   ├── cache.py                # File-based response caching
+│   │   ├── reddit_client.py        # Reddit .json HTTP client
 │   │   ├── x_client.py             # twscrape client setup
 │   │   ├── article_parser.py       # X Article Draft.js-to-markdown
 │   │   └── transcriber.py          # SenseVoice ASR engine

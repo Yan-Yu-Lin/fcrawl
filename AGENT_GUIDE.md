@@ -84,6 +84,27 @@ fcrawl yt-channel "@handle" --search "topic"  # Filter by keyword
 fcrawl yt-channel "@handle" --type shorts # Get shorts instead
 ```
 
+### Reddit — Research Threads and Communities
+
+You have read-only Reddit access without auth via public `.json` endpoints:
+
+```bash
+fcrawl reddit search "query"                  # Search posts
+fcrawl reddit search "query" -s python        # Restrict to subreddit
+fcrawl reddit search "query" -u spez          # Restrict by author
+
+fcrawl reddit post URL_OR_ID                   # Fetch post + comments
+fcrawl reddit post URL_OR_ID --no-comments     # Post only
+
+fcrawl reddit subreddit python                 # Browse feed
+fcrawl reddit subreddit python --about         # Subreddit metadata
+
+fcrawl reddit user spez                        # Profile + recent activity
+fcrawl reddit user spez --comments-only        # Comments only
+```
+
+For pagination, use `--after` with the cursor from previous JSON output.
+
 ### X/Twitter — Browse and Search
 
 You have full access to X/Twitter:
