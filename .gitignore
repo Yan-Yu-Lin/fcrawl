@@ -69,6 +69,7 @@ output/
 *.md
 !README.md
 !CLAUDE.md
+!AGENT_GUIDE.md
 !docs/*.md
 !docs/**/*.md
 !requirements.txt
