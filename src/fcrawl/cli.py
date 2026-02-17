@@ -19,6 +19,7 @@ from .commands.yt_transcript import yt_transcript
 from .commands.yt_channel import yt_channel
 from .commands.transcribe import transcribe
 from .commands.x import x
+from .commands.reddit import reddit
 from .utils.config import load_config, get_firecrawl_client
 
 console = Console()
@@ -69,6 +70,7 @@ cli.add_command(yt_transcript)
 cli.add_command(yt_channel)
 cli.add_command(transcribe)
 cli.add_command(x)
+cli.add_command(reddit)
 
 
 @cli.command()
