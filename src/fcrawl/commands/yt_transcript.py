@@ -109,6 +109,17 @@ class YouTubeTranscriptDownloader:
                 raise yt_dlp.utils.DownloadError("Could not extract YouTube info")
             return cast(dict[str, Any], info)
 
+    def _get_asr_dependency_error(self) -> Optional[str]:
+        """Return a user-friendly error if optional ASR deps are missing."""
+        from ..utils.transcriber import missing_asr_dependencies, ASR_INSTALL_HINT
+
+        missing = missing_asr_dependencies(include_opencc=not self.simplified)
+        if not missing:
+            return None
+
+        deps = ", ".join(missing)
+        return f"Local transcription fallback unavailable. Missing dependencies: {deps}. {ASR_INSTALL_HINT}"
+
     def _download_subtitles(
         self, video_url: str, selected_lang: str, use_cookies: bool
     ) -> str:
@@ -216,6 +227,10 @@ class YouTubeTranscriptDownloader:
 
         # Force local transcription - skip subtitle fetch entirely
         if self.force_transcribe:
+            asr_error = self._get_asr_dependency_error()
+            if asr_error:
+                return {"error": asr_error}
+
             self.log("Force transcribe enabled, using SenseVoice...")
             try:
                 if self.prefer_cookies and self._has_cookies():
@@ -234,7 +249,13 @@ class YouTubeTranscriptDownloader:
 
         # If no subtitles available, try ASR fallback
         if "error" in meta:
-            if not self.no_transcribe and "No subtitles available" in meta.get("error", ""):
+            if not self.no_transcribe and "No subtitles available" in meta.get(
+                "error", ""
+            ):
+                asr_error = self._get_asr_dependency_error()
+                if asr_error:
+                    return {"error": asr_error}
+
                 self.log("No subtitles found, transcribing with SenseVoice...")
                 try:
                     if self.prefer_cookies and self._has_cookies():
@@ -407,36 +428,42 @@ class YouTubeTranscriptDownloader:
         """
         from ..utils.transcriber import SenseVoiceTranscriber
 
-        title = info.get('title', 'Unknown')
-        video_id = info.get('id', '')
-        duration = info.get('duration', 0)
-        channel = info.get('channel', info.get('uploader', 'Unknown'))
-        channel_id = info.get('channel_id', '')
-        description = info.get('description', '')
-        upload_date = info.get('upload_date', '')
-        view_count = info.get('view_count', 0)
+        title = info.get("title", "Unknown")
+        video_id = info.get("id", "")
+        duration = info.get("duration", 0)
+        channel = info.get("channel", info.get("uploader", "Unknown"))
+        channel_id = info.get("channel_id", "")
+        description = info.get("description", "")
+        upload_date = info.get("upload_date", "")
+        view_count = info.get("view_count", 0)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             self.log("Downloading audio...")
 
             # Download audio only
             audio_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(tmpdir, '%(id)s.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'wav',
-                    'preferredquality': '192',
-                }],
-                'postprocessor_args': ['-ar', '16000', '-ac', '1'],
-                'quiet': True,
-                'no_warnings': True,
-                'noprogress': True,
-                'logger': type('QuietLogger', (), {
-                    'debug': lambda *a: None,
-                    'warning': lambda *a: None,
-                    'error': lambda *a: None
-                })(),
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(tmpdir, "%(id)s.%(ext)s"),
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "wav",
+                        "preferredquality": "192",
+                    }
+                ],
+                "postprocessor_args": ["-ar", "16000", "-ac", "1"],
+                "quiet": True,
+                "no_warnings": True,
+                "noprogress": True,
+                "logger": type(
+                    "QuietLogger",
+                    (),
+                    {
+                        "debug": lambda *a: None,
+                        "warning": lambda *a: None,
+                        "error": lambda *a: None,
+                    },
+                )(),
             }
 
             # Apply cookies if available
@@ -452,13 +479,13 @@ class YouTubeTranscriptDownloader:
             # Find the downloaded audio file
             wav_file = None
             for filename in os.listdir(tmpdir):
-                if filename.endswith('.wav'):
+                if filename.endswith(".wav"):
                     wav_file = os.path.join(tmpdir, filename)
                     break
 
             if not wav_file:
                 # Try other formats if WAV wasn't created
-                for ext in ['.m4a', '.mp3', '.webm', '.opus']:
+                for ext in [".m4a", ".mp3", ".webm", ".opus"]:
                     for filename in os.listdir(tmpdir):
                         if filename.endswith(ext):
                             wav_file = os.path.join(tmpdir, filename)
@@ -525,12 +552,22 @@ class YouTubeTranscriptDownloader:
     default=True,
     help="Retry with cookies if YouTube throttles/blocks unauthenticated requests",
 )
-@click.option("--no-transcribe", is_flag=True,
-              help="Disable auto-transcription fallback when no subtitles")
-@click.option("--force-transcribe", "-t", is_flag=True,
-              help="Force local transcription (ignore YouTube subtitles)")
-@click.option("--simplified", is_flag=True,
-              help="Output Simplified Chinese (default: Traditional)")
+@click.option(
+    "--no-transcribe",
+    is_flag=True,
+    help="Disable auto-transcription fallback when no subtitles",
+)
+@click.option(
+    "--force-transcribe",
+    "-t",
+    is_flag=True,
+    help="Force local transcription (ignore YouTube subtitles)",
+)
+@click.option(
+    "--simplified",
+    is_flag=True,
+    help="Output Simplified Chinese (default: Traditional)",
+)
 def yt_transcript(
     url: str,
     lang: Optional[str],
