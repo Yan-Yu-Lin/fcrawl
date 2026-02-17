@@ -17,6 +17,7 @@ from .commands.gsearch import gsearch
 from .commands.csearch import csearch
 from .commands.yt_transcript import yt_transcript
 from .commands.yt_channel import yt_channel
+from .commands.transcribe import transcribe
 from .commands.x import x
 from .utils.config import load_config, get_firecrawl_client
 
@@ -66,6 +67,7 @@ cli.add_command(gsearch)
 cli.add_command(csearch)
 cli.add_command(yt_transcript)
 cli.add_command(yt_channel)
+cli.add_command(transcribe)
 cli.add_command(x)
 
 
