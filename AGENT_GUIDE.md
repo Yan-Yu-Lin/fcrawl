@@ -14,7 +14,7 @@ The built-in WebSearch and WebFetch tools are lossy. They pipe web content throu
 
 ---
 
-## fcrawl — Web, YouTube, and X/Twitter
+## fcrawl — Web, YouTube, Reddit, and X/Twitter
 
 Use `fcrawl` as the default tool for all web-related tasks instead of the built-in WebSearch tool or Firecrawl MCP tools. It's simpler, more reliable, and handles way more than just web pages.
 
@@ -124,6 +124,7 @@ fcrawl x tweets handle               # Get user's recent tweets
 - **Cache control:** `--no-cache` for fresh fetch, `--cache-only` to skip API
 - **Clipboard:** `--copy` to copy output to clipboard
 - **Detailed flags:** Run `fcrawl <command> --help` for all options
+- **Reddit tip:** Prefer `fcrawl reddit post URL_OR_ID --json` for agent workflows (clean post+comment structure, easier parsing)
 - **Note:** `fcrawl extract` is broken — just scrape and process content directly
 - **Crawl workaround:** If `fcrawl crawl` doesn't discover links, use `fcrawl scrape URL --raw --wait 5000 -f links` first, then scrape each link
 
@@ -132,6 +133,32 @@ fcrawl x tweets handle               # Get user's recent tweets
 ## Navigating API Docs Like a Human
 
 When you need up-to-date API documentation for any service, follow this approach:
+
+### 0. Find the official docs domain first
+
+Before guessing `*/llms.txt`, first find the canonical docs home with a simple search:
+
+```bash
+fcrawl search "<product> documentation"
+```
+
+**Hard rule:** Do NOT guess docs domains or `llms.txt` paths at the start. First identify the official docs domain, then probe `llms.txt` on that domain.
+
+Bad first move:
+
+```bash
+fcrawl scrape https://some-guessed-domain.com/docs/llms.txt
+```
+
+Good first move:
+
+```bash
+fcrawl search "<product> documentation"
+```
+
+Use broad queries first. Do **not** over-constrain early with `site:` filters or `llms.txt` in the query. Those can anchor you to the wrong domain.
+
+Once you identify the official docs domain, then probe `llms.txt` on that same domain.
 
 ### 1. Try `llms.txt` first
 
@@ -149,6 +176,8 @@ fcrawl scrape https://example.com/docs/llms.txt
 ```
 
 Use `llms.txt`, NOT `llms-full.txt` — the full version dumps entire page contents and will flood your context. What you want is the index: a structured list of every page and what it covers. That's your table of contents. From there, scrape individual pages as needed.
+
+**Important:** Do NOT use `--no-links` when scraping `llms.txt`. The whole point of `llms.txt` is the URL index. `--no-links` strips markdown link targets and keeps only display text, which destroys the doc map and makes follow-up page scraping much harder.
 
 ### 2. If no `llms.txt`, discover the site map manually
 
