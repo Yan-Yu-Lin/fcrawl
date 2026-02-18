@@ -26,7 +26,7 @@ class RedditClient:
         )
         self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
-    def get(self, path: str, params: dict = None) -> dict:
+    def get(self, path: str, params: dict | None = None) -> dict:
         """GET reddit.com/{path}.json with params.
 
         Args:
@@ -44,3 +44,9 @@ class RedditClient:
         resp = self.session.get(url, params=params, timeout=15)
         resp.raise_for_status()
         return resp.json()
+
+    def resolve_share_url(self, url: str) -> str:
+        """Resolve a Reddit share URL by following redirects."""
+        resp = self.session.get(url, allow_redirects=True, timeout=15)
+        resp.raise_for_status()
+        return resp.url

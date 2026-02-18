@@ -7,16 +7,17 @@ from rich.console import Console
 from typing import Optional, List
 
 from ..utils.config import get_firecrawl_client
-from ..utils.output import handle_output, console
+from ..utils.output import handle_output, console, resolve_pretty
+
 
 @click.command()
-@click.argument('urls', nargs=-1, required=True)
-@click.option('--prompt', help='Extraction prompt for the AI')
-@click.option('--fields', help='Comma-separated list of fields to extract')
-@click.option('--schema', help='JSON schema file for extraction')
-@click.option('-o', '--output', help='Save output to file')
-@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-@click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
+@click.argument("urls", nargs=-1, required=True)
+@click.option("--prompt", help="Extraction prompt for the AI")
+@click.option("--fields", help="Comma-separated list of fields to extract")
+@click.option("--schema", help="JSON schema file for extraction")
+@click.option("-o", "--output", help="Save output to file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 def extract(
     urls: List[str],
     prompt: Optional[str],
@@ -24,7 +25,7 @@ def extract(
     schema: Optional[str],
     output: Optional[str],
     json_output: bool,
-    pretty: bool
+    pretty: Optional[bool],
 ):
     """Extract structured data from URLs using AI
 
@@ -42,38 +43,40 @@ def extract(
         fcrawl extract https://store.com --fields "price,title,description"
         fcrawl extract https://store.com --prompt "Extract product information"
     """
+    pretty = resolve_pretty(pretty)
+
     # Prepare extraction options
-    extract_options = {
-        'urls': list(urls)
-    }
+    extract_options = {"urls": list(urls)}
 
     # Build prompt from fields if provided
     if fields and not prompt:
-        field_list = fields.split(',')
+        field_list = fields.split(",")
         prompt = f"Extract the following information: {', '.join(field_list)}"
 
     if prompt:
-        extract_options['prompt'] = prompt
+        extract_options["prompt"] = prompt
 
     # Load schema if provided
     if schema:
         try:
-            with open(schema, 'r') as f:
+            with open(schema, "r") as f:
                 schema_data = json.load(f)
-                extract_options['schema'] = schema_data
+                extract_options["schema"] = schema_data
         except Exception as e:
             console.print(f"[red]Error loading schema file: {e}[/red]")
             raise click.Abort()
 
     if not prompt and not schema:
-        console.print("[red]Error: Either --prompt, --fields, or --schema must be provided[/red]")
+        console.print(
+            "[red]Error: Either --prompt, --fields, or --schema must be provided[/red]"
+        )
         raise click.Abort()
 
     # Show progress
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
-        console=console
+        console=console,
     ) as progress:
         task = progress.add_task(f"Extracting from {len(urls)} URL(s)...", total=None)
 
@@ -96,11 +99,11 @@ def extract(
 
                 # Handle output
                 handle_output(
-                    result.data if hasattr(result, 'data') else result,
+                    result.data if hasattr(result, "data") else result,
                     output_file=output,
                     json_output=True,  # Always JSON for structured data
                     pretty=pretty,
-                    format_type='json'
+                    format_type="json",
                 )
             else:
                 console.print("[yellow]No data extracted[/yellow]")
@@ -108,8 +111,12 @@ def extract(
         except AttributeError:
             # Extract might not be available or might work differently
             progress.stop()
-            console.print("[yellow]Note: Extract feature may require API key or may not be available in self-hosted mode[/yellow]")
-            console.print("[cyan]Alternative: Use 'fcrawl scrape' with format options for basic extraction[/cyan]")
+            console.print(
+                "[yellow]Note: Extract feature may require API key or may not be available in self-hosted mode[/yellow]"
+            )
+            console.print(
+                "[cyan]Alternative: Use 'fcrawl scrape' with format options for basic extraction[/cyan]"
+            )
 
         except Exception as e:
             progress.stop()

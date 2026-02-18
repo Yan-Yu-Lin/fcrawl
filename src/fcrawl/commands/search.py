@@ -11,7 +11,7 @@ from rich.table import Table
 
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import load_config
-from ..utils.output import console, handle_output
+from ..utils.output import console, handle_output, resolve_pretty
 
 
 SERPER_ENDPOINT = "https://google.serper.dev/search"
@@ -207,7 +207,7 @@ def _display_results(results: list[dict]):
 )
 @click.option("-o", "--output", help="Save output to file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 @click.option(
     "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
 )
@@ -222,12 +222,14 @@ def search(
     location: Optional[str],
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
     debug: bool,
 ):
     """Search the web using Serper.dev (Google API)."""
+    pretty = resolve_pretty(pretty)
+
     if limit < 1:
         raise click.BadParameter("limit must be >= 1", param_hint="--limit")
 

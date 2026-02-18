@@ -14,7 +14,7 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from ..utils.output import handle_output, console
+from ..utils.output import handle_output, console, resolve_pretty
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..engines import get_engine, get_all_engines, ENGINES
 from ..engines.base import SearchResult, EngineStatus, get_ua_for_os
@@ -245,7 +245,7 @@ def _display_results(results: list[dict], show_engines: bool = True):
 @click.option("--headful", is_flag=True, help="Show browser window (for debugging)")
 @click.option("-o", "--output", help="Save output to file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 @click.option(
     "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
 )
@@ -271,7 +271,7 @@ def csearch(
     headful: bool,
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
     locale: Optional[str],
@@ -305,6 +305,8 @@ def csearch(
         fcrawl csearch "news" -L ja-JP                 # Japanese results
         fcrawl csearch "python" --sequential           # One engine at a time
     """
+    pretty = resolve_pretty(pretty)
+
     # Check Camoufox installation
     if not _check_camoufox_installed():
         console.print("[red]Camoufox is not installed.[/red]")

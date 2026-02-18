@@ -17,7 +17,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from ..utils.cache import cache_key, read_cache, write_cache
-from ..utils.output import save_to_file
+from ..utils.output import save_to_file, resolve_pretty
 from ..utils.reddit_client import RedditClient
 
 console = Console()
@@ -118,12 +118,35 @@ def _normalize_username(username: str) -> str:
     return value
 
 
-def _parse_post_target(url_or_id: str) -> str:
+def _is_share_target(target: str) -> bool:
+    """Return True when target matches Reddit /s/ share URL pattern."""
+    return bool(
+        re.fullmatch(
+            r"(?:(?:https?://)?(?:www\.|old\.)?reddit\.com)?/r/[^/]+/s/[^/]+",
+            target,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _resolve_share_target(target: str, client: RedditClient) -> str:
+    """Resolve Reddit /s/ share URL via HTTP redirect."""
+    if target.startswith("/"):
+        target = f"https://www.reddit.com{target}"
+    elif not target.startswith("http://") and not target.startswith("https://"):
+        target = f"https://{target}"
+
+    resolved = client.resolve_share_url(target)
+    return resolved.split("?")[0].split("#")[0].strip().rstrip("/")
+
+
+def _parse_post_target(url_or_id: str, client: Optional[RedditClient] = None) -> str:
     """Extract post path from URL/short URL/path/post ID.
 
     Accepted inputs:
     - https://www.reddit.com/r/<sub>/comments/<id>/<slug>/
     - https://old.reddit.com/r/<sub>/comments/<id>/<slug>/
+    - https://www.reddit.com/r/<sub>/s/<token>
     - https://reddit.com/comments/<id>
     - https://redd.it/<id>
     - /r/<sub>/comments/<id>/<slug>/
@@ -133,6 +156,14 @@ def _parse_post_target(url_or_id: str) -> str:
         comments/<id>
     """
     target = url_or_id.strip().split("?")[0].split("#")[0].strip().rstrip("/")
+
+    if client and _is_share_target(target):
+        try:
+            target = _resolve_share_target(target, client)
+        except Exception as exc:
+            raise ValueError(
+                f"Cannot resolve Reddit share URL: {url_or_id} ({exc})"
+            ) from exc
 
     if POST_ID_RE.fullmatch(target):
         return f"comments/{target.lower()}"
@@ -712,7 +743,7 @@ def reddit():
 @click.option("--after", default=None, help="Pagination cursor from previous result")
 @click.option("-o", "--output", help="Save output to file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 @click.option(
     "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
 )
@@ -727,7 +758,7 @@ def reddit_search(
     after: Optional[str],
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
 ):
@@ -739,6 +770,8 @@ def reddit_search(
         fcrawl reddit search "hooks" -s ClaudeCode --sort top
         fcrawl reddit search "mcp server" --user spez --time week -l 10
     """
+    pretty = resolve_pretty(pretty)
+
     if limit < 1:
         raise click.BadParameter("limit must be >= 1", param_hint="--limit")
 
@@ -859,7 +892,7 @@ def reddit_search(
 )
 @click.option("-o", "--output", help="Save output to file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 @click.option(
     "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
 )
@@ -872,7 +905,7 @@ def reddit_post(
     no_comments: bool,
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
 ):
@@ -884,13 +917,17 @@ def reddit_post(
         fcrawl reddit post 1abc234 --limit 5 --depth 2
         fcrawl reddit post URL --sort top --no-comments
     """
+    pretty = resolve_pretty(pretty)
+
     if limit < 0:
         raise click.BadParameter("limit must be >= 0", param_hint="--limit")
     if depth < 1:
         raise click.BadParameter("depth must be >= 1", param_hint="--depth")
 
+    client = RedditClient()
+
     try:
-        path = _parse_post_target(url_or_id)
+        path = _parse_post_target(url_or_id, client=client)
     except ValueError as exc:
         console.print(f"[red]{exc}[/red]")
         raise click.Abort()
@@ -901,7 +938,6 @@ def reddit_post(
     elif limit > 0:
         params["limit"] = limit
 
-    client = RedditClient()
     result, from_cache = _fetch_with_cache(
         client=client,
         cache_bucket="reddit-post",
@@ -992,7 +1028,7 @@ def reddit_post(
 @click.option("--about", is_flag=True, help="Show subreddit info instead of feed")
 @click.option("-o", "--output", help="Save output to file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 @click.option(
     "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
 )
@@ -1006,7 +1042,7 @@ def reddit_subreddit(
     about: bool,
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
 ):
@@ -1018,6 +1054,8 @@ def reddit_subreddit(
         fcrawl reddit subreddit ClaudeCode --sort top --time week
         fcrawl reddit subreddit python --after t3_1abc234
     """
+    pretty = resolve_pretty(pretty)
+
     if limit < 1:
         raise click.BadParameter("limit must be >= 1", param_hint="--limit")
 
@@ -1135,7 +1173,7 @@ def reddit_subreddit(
 @click.option("--after", default=None, help="Pagination cursor from previous result")
 @click.option("-o", "--output", help="Save output to file")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
-@click.option("--pretty/--no-pretty", default=True, help="Pretty print output")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
 @click.option(
     "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
 )
@@ -1152,7 +1190,7 @@ def reddit_user(
     after: Optional[str],
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
 ):
@@ -1164,6 +1202,8 @@ def reddit_user(
         fcrawl reddit user spez --posts-only --sort top
         fcrawl reddit user u/spez --comments-only -l 10
     """
+    pretty = resolve_pretty(pretty)
+
     if posts_only and comments_only:
         raise click.BadParameter("cannot use --posts-only and --comments-only together")
     if limit < 1:

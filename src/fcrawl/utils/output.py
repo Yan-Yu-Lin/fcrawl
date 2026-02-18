@@ -23,7 +23,7 @@ def extract_markdown_links(content: str) -> List[str]:
     if not content:
         return []
     # Match [text](url) - validates full link structure, handles escaped brackets
-    pattern = r'\\?\[[^\]]+\\?\]\((https?://[^)\s]+)\)'
+    pattern = r"\\?\[[^\]]+\\?\]\((https?://[^)\s]+)\)"
     urls = re.findall(pattern, content)
     # Deduplicate while preserving order
     seen = set()
@@ -33,71 +33,87 @@ def extract_markdown_links(content: str) -> List[str]:
 def strip_links(content: str) -> str:
     """Remove markdown links, preserving display text. Images get [Image: alt] marker."""
     # Nested image links: [![alt](img)](url) → [Image: alt]
-    content = re.sub(r'\[!\[([^\]]*)\]\([^)]+\)\]\([^)]+\)', r'[Image: \1]', content)
+    content = re.sub(r"\[!\[([^\]]*)\]\([^)]+\)\]\([^)]+\)", r"[Image: \1]", content)
     # Images with alt: ![alt](url) → [Image: alt]
-    content = re.sub(r'!\[([^\]]+)\]\([^)]+\)', r'[Image: \1]', content)
+    content = re.sub(r"!\[([^\]]+)\]\([^)]+\)", r"[Image: \1]", content)
     # Images without alt: ![](url) → [Image]
-    content = re.sub(r'!\[\]\([^)]+\)', '[Image]', content)
+    content = re.sub(r"!\[\]\([^)]+\)", "[Image]", content)
     # Wikipedia-style citations: [\[N\]](url) or [[note N]](url) → [N] or [note N]
-    content = re.sub(r'\[\\?\[([^\]]+)\\?\]\]\([^)]+\)', r'[\1]', content)
+    content = re.sub(r"\[\\?\[([^\]]+)\\?\]\]\([^)]+\)", r"[\1]", content)
     # Links with brackets inside text: [text [with brackets]](url) → text [with brackets]
-    content = re.sub(r'\[([^\]]+(?:\[[^\]]+\][^\]]*)*)\]\(https?://[^)]+(?:\s+"[^"]*")?\)', r'\1', content)
+    content = re.sub(
+        r'\[([^\]]+(?:\[[^\]]+\][^\]]*)*)\]\(https?://[^)]+(?:\s+"[^"]*")?\)',
+        r"\1",
+        content,
+    )
     # Run link removal multiple times to handle remaining cases
     for _ in range(3):
         # Links: [text](url) → text (handles simple cases)
-        content = re.sub(r'\[([^\[\]]+)\]\([^)]+\)', r'\1', content)
+        content = re.sub(r"\[([^\[\]]+)\]\([^)]+\)", r"\1", content)
     # Clean up stray escaped brackets: \[ → [ and \] → ]
-    content = re.sub(r'\\([\[\]])', r'\1', content)
+    content = re.sub(r"\\([\[\]])", r"\1", content)
     return content
 
-def display_content(content: Any, format_type: str = 'markdown', pretty: bool = True):
+
+def resolve_pretty(pretty: Optional[bool]) -> bool:
+    """Resolve pretty flag with TTY-aware default behavior."""
+    if pretty is None:
+        return sys.stdout.isatty()
+    return pretty
+
+
+def display_content(content: Any, format_type: str = "markdown", pretty: bool = True):
     """Display content in the terminal with formatting"""
     if not pretty or not sys.stdout.isatty():
         # Plain output for pipes or non-interactive
         print(content)
         return
 
-    if format_type == 'markdown':
+    if format_type == "markdown":
         md = Markdown(content)
         console.print(md)
-    elif format_type == 'json':
+    elif format_type == "json":
         if isinstance(content, str):
             content = json.loads(content)
         syntax = Syntax(json.dumps(content, indent=2), "json", theme="monokai")
         console.print(syntax)
-    elif format_type == 'html':
+    elif format_type == "html":
         syntax = Syntax(content, "html", theme="monokai")
         console.print(syntax)
-    elif format_type == 'links':
+    elif format_type == "links":
         if isinstance(content, list):
             table = Table(title="Links Found")
             table.add_column("URL", style="cyan")
             for link in content:
-                table.add_row(link if isinstance(link, str) else link.get('url', str(link)))
+                table.add_row(
+                    link if isinstance(link, str) else link.get("url", str(link))
+                )
             console.print(table)
         else:
             console.print(content)
     else:
         console.print(content)
 
-def save_to_file(content: Any, filepath: str, format_type: str = 'markdown'):
+
+def save_to_file(content: Any, filepath: str, format_type: str = "markdown"):
     """Save content to a file"""
     path = Path(filepath)
 
     # Create parent directories if they don't exist
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    if format_type == 'json':
-        with open(path, 'w') as f:
+    if format_type == "json":
+        with open(path, "w") as f:
             if isinstance(content, str):
                 f.write(content)
             else:
                 json.dump(content, f, indent=2)
     else:
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             f.write(str(content))
 
     console.print(f"[green]✓ Saved to {filepath}[/green]")
+
 
 def copy_to_clipboard(content: Any):
     """Copy content to clipboard"""
@@ -108,22 +124,24 @@ def copy_to_clipboard(content: Any):
     except Exception as e:
         console.print(f"[red]Failed to copy to clipboard: {e}[/red]")
 
+
 def format_result(result: Any, formats: List[str]) -> Dict[str, Any]:
     """Format Firecrawl result based on requested formats"""
     formatted = {}
 
-    if hasattr(result, 'markdown') and 'markdown' in formats:
-        formatted['markdown'] = result.markdown
-    if hasattr(result, 'html') and 'html' in formats:
-        formatted['html'] = result.html
-    if hasattr(result, 'links') and 'links' in formats:
-        formatted['links'] = result.links
-    if hasattr(result, 'screenshot') and 'screenshot' in formats:
-        formatted['screenshot'] = result.screenshot
-    if hasattr(result, 'metadata'):
-        formatted['metadata'] = result.metadata
+    if hasattr(result, "markdown") and "markdown" in formats:
+        formatted["markdown"] = result.markdown
+    if hasattr(result, "html") and "html" in formats:
+        formatted["html"] = result.html
+    if hasattr(result, "links") and "links" in formats:
+        formatted["links"] = result.links
+    if hasattr(result, "screenshot") and "screenshot" in formats:
+        formatted["screenshot"] = result.screenshot
+    if hasattr(result, "metadata"):
+        formatted["metadata"] = result.metadata
 
     return formatted
+
 
 def handle_output(
     content: Any,
@@ -131,19 +149,19 @@ def handle_output(
     copy: bool = False,
     json_output: bool = False,
     pretty: bool = True,
-    format_type: str = 'markdown'
+    format_type: str = "markdown",
 ):
     """Handle all output options"""
     # Prepare content for output
     if json_output:
-        if hasattr(content, '__dict__'):
+        if hasattr(content, "__dict__"):
             content = content.__dict__
         output_content = json.dumps(content, indent=2 if pretty else None)
-        format_type = 'json'
+        format_type = "json"
     else:
         if isinstance(content, dict):
             # If multiple formats, use the first available
-            for fmt in ['markdown', 'html', 'links']:
+            for fmt in ["markdown", "html", "links"]:
                 if fmt in content:
                     output_content = content[fmt]
                     format_type = fmt

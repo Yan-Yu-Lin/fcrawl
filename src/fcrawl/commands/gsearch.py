@@ -10,7 +10,7 @@ from typing import Optional
 from urllib.parse import quote_plus
 
 from ..engines.base import get_ua_for_os
-from ..utils.output import handle_output, console
+from ..utils.output import handle_output, console, resolve_pretty
 from ..utils.cache import cache_key, read_cache, write_cache
 
 
@@ -38,6 +38,7 @@ def _check_camoufox_installed() -> bool:
     """Check if Camoufox Python package is installed"""
     try:
         from camoufox.sync_api import Camoufox
+
         return True
     except ImportError:
         return False
@@ -47,11 +48,15 @@ def _check_camoufox_browser() -> bool:
     """Check if Camoufox browser binary is downloaded"""
     try:
         from pathlib import Path
+
         # Camoufox caches the browser in user's cache directory
         import sys
+
         if sys.platform == "darwin":
             cache_dir = Path.home() / "Library" / "Caches" / "camoufox"
-            browser_path = cache_dir / "Camoufox.app" / "Contents" / "MacOS" / "camoufox"
+            browser_path = (
+                cache_dir / "Camoufox.app" / "Contents" / "MacOS" / "camoufox"
+            )
         elif sys.platform == "win32":
             cache_dir = Path.home() / "AppData" / "Local" / "camoufox"
             browser_path = cache_dir / "camoufox" / "camoufox.exe"
@@ -114,18 +119,22 @@ def _extract_results_from_page(page) -> list[dict]:
 
             # Only add if we have a valid URL
             if url and url.startswith("http"):
-                results.append({
-                    "title": title.strip() if title else "",
-                    "url": url,
-                    "description": description.strip() if description else ""
-                })
+                results.append(
+                    {
+                        "title": title.strip() if title else "",
+                        "url": url,
+                        "description": description.strip() if description else "",
+                    }
+                )
         except Exception:
             continue
 
     return results
 
 
-def _google_search(query: str, limit: int, headless: bool, locale: Optional[str] = None) -> list[dict]:
+def _google_search(
+    query: str, limit: int, headless: bool, locale: Optional[str] = None
+) -> list[dict]:
     """Perform Google search using Camoufox with pagination support"""
     from camoufox.sync_api import Camoufox
 
@@ -218,25 +227,37 @@ def _google_search(query: str, limit: int, headless: bool, locale: Optional[str]
 
 
 @click.command()
-@click.argument('query')
-@click.option('--limit', '-l', type=int, default=10,
-              help='Maximum number of results (default: 10)')
-@click.option('--headful', is_flag=True,
-              help='Show browser window (for debugging)')
-@click.option('-o', '--output', help='Save output to file')
-@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-@click.option('--pretty/--no-pretty', default=True, help='Pretty print output')
-@click.option('--no-cache', 'no_cache', is_flag=True, help='Bypass cache, force fresh fetch')
-@click.option('--cache-only', 'cache_only', is_flag=True, help='Only read from cache, no search')
-@click.option('--locale', '-L', default=None,
-              help='Locale for regional results (e.g., ja-JP, en-GB, zh-TW)')
+@click.argument("query")
+@click.option(
+    "--limit",
+    "-l",
+    type=int,
+    default=10,
+    help="Maximum number of results (default: 10)",
+)
+@click.option("--headful", is_flag=True, help="Show browser window (for debugging)")
+@click.option("-o", "--output", help="Save output to file")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--pretty/--no-pretty", default=None, help="Pretty print output")
+@click.option(
+    "--no-cache", "no_cache", is_flag=True, help="Bypass cache, force fresh fetch"
+)
+@click.option(
+    "--cache-only", "cache_only", is_flag=True, help="Only read from cache, no search"
+)
+@click.option(
+    "--locale",
+    "-L",
+    default=None,
+    help="Locale for regional results (e.g., ja-JP, en-GB, zh-TW)",
+)
 def gsearch(
     query: str,
     limit: int,
     headful: bool,
     output: Optional[str],
     json_output: bool,
-    pretty: bool,
+    pretty: Optional[bool],
     no_cache: bool,
     cache_only: bool,
     locale: Optional[str],
@@ -259,6 +280,8 @@ def gsearch(
         fcrawl gsearch "news" --locale ja-JP      # Japanese results
         fcrawl gsearch "restaurants" -L en-GB     # UK results
     """
+    pretty = resolve_pretty(pretty)
+
     # Check if Camoufox is installed
     if not _check_camoufox_installed():
         console.print("[red]Camoufox is not installed.[/red]")
@@ -272,14 +295,14 @@ def gsearch(
         raise click.Abort()
 
     # Generate cache key (include locale for different regional results)
-    cache_opts = {'limit': limit, 'locale': locale}
+    cache_opts = {"limit": limit, "locale": locale}
     key = cache_key(query, cache_opts)
 
     # Check cache first (unless --no-cache)
     result = None
     from_cache = False
     if not no_cache:
-        cached = read_cache('gsearch', key)
+        cached = read_cache("gsearch", key)
         if cached:
             result = cached
             from_cache = True
@@ -295,16 +318,18 @@ def gsearch(
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            console=console
+            console=console,
         ) as progress:
             task = progress.add_task(f"Searching Google for '{query}'...", total=None)
 
             try:
-                result = _google_search(query, limit, headless=not headful, locale=locale)
+                result = _google_search(
+                    query, limit, headless=not headful, locale=locale
+                )
                 progress.stop()
 
                 # Write to cache
-                write_cache('gsearch', key, result)
+                write_cache("gsearch", key, result)
 
             except Exception as e:
                 progress.stop()
@@ -325,16 +350,16 @@ def gsearch(
     # Handle file/JSON output
     if output or json_output:
         handle_output(
-            {'web': result},
+            {"web": result},
             output_file=output,
             json_output=True,
             pretty=pretty,
-            format_type='json'
+            format_type="json",
         )
     elif not pretty:
         # Plain output for piping
         for r in result:
-            print(r.get('url', ''))
+            print(r.get("url", ""))
 
 
 def _display_results(results: list[dict]):
@@ -343,9 +368,9 @@ def _display_results(results: list[dict]):
     console.print("=" * 60)
 
     for i, r in enumerate(results, 1):
-        title = r.get('title', 'No title')
-        url = r.get('url', '')
-        description = r.get('description', '')
+        title = r.get("title", "No title")
+        url = r.get("url", "")
+        description = r.get("description", "")
 
         console.print(f"[bold cyan]## {title}[/bold cyan]")
         console.print(f"[blue]{url}[/blue]")
