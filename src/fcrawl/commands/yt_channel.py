@@ -30,7 +30,11 @@ class YouTubeChannelExplorer:
         # Already a full URL
         if channel.startswith("http"):
             # Ensure we have /videos suffix for proper listing
-            if "/videos" not in channel and "/shorts" not in channel and "/streams" not in channel:
+            if (
+                "/videos" not in channel
+                and "/shorts" not in channel
+                and "/streams" not in channel
+            ):
                 channel = channel.rstrip("/") + "/videos"
             return channel
 
@@ -66,10 +70,10 @@ class YouTubeChannelExplorer:
             channel_url = base_url + "/videos"
 
         ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': not with_dates,  # Flat is faster but less info
-            'ignoreerrors': True,
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": not with_dates,  # Flat is faster but less info
+            "ignoreerrors": True,
         }
 
         try:
@@ -79,41 +83,42 @@ class YouTubeChannelExplorer:
                 if not info:
                     return {"error": "Could not fetch channel information"}
 
-                entries = info.get('entries', [])
+                entries = info.get("entries", [])
                 if not entries:
                     return {"error": "No videos found"}
 
                 # Convert generator to list if needed
                 entries = list(entries)
 
-                channel_name = info.get('channel', info.get('uploader', 'Unknown'))
-                channel_id = info.get('channel_id', info.get('uploader_id', ''))
+                channel_name = info.get("channel", info.get("uploader", "Unknown"))
+                channel_id = info.get("channel_id", info.get("uploader_id", ""))
                 total_count = len(entries)
 
                 # Process entries
                 videos = []
-                for i, entry in enumerate(entries):
+                for entry in entries:
                     if entry is None:
                         continue
 
                     video = {
-                        "index": i + 1,
-                        "id": entry.get('id', ''),
-                        "title": entry.get('title', 'Unknown'),
+                        "id": entry.get("id", ""),
+                        "title": entry.get("title", "Unknown"),
                         "url": f"https://youtube.com/watch?v={entry.get('id', '')}",
-                        "duration": entry.get('duration') or 0,
-                        "duration_human": self._format_duration(entry.get('duration')),
-                        "views": entry.get('view_count') or 0,
+                        "duration": entry.get("duration") or 0,
+                        "duration_human": self._format_duration(entry.get("duration")),
+                        "views": entry.get("view_count") or 0,
                     }
 
                     # Add upload date if available (slower fetch mode)
-                    if with_dates and entry.get('upload_date'):
-                        video["upload_date"] = entry.get('upload_date')
+                    if with_dates and entry.get("upload_date"):
+                        video["upload_date"] = entry.get("upload_date")
 
                     # Add description snippet if available
-                    desc = entry.get('description', '')
+                    desc = entry.get("description", "")
                     if desc:
-                        video["description_snippet"] = desc[:200] + "..." if len(desc) > 200 else desc
+                        video["description_snippet"] = (
+                            desc[:200] + "..." if len(desc) > 200 else desc
+                        )
 
                     videos.append(video)
 
@@ -121,23 +126,28 @@ class YouTubeChannelExplorer:
                 if search:
                     search_lower = search.lower()
                     videos = [
-                        v for v in videos
-                        if search_lower in v['title'].lower()
-                        or search_lower in v.get('description_snippet', '').lower()
+                        v
+                        for v in videos
+                        if search_lower in v["title"].lower()
+                        or search_lower in v.get("description_snippet", "").lower()
                     ]
 
                 # Sort
                 if sort_by == "views":
-                    videos.sort(key=lambda x: x['views'], reverse=True)
+                    videos.sort(key=lambda x: x["views"], reverse=True)
                 elif sort_by == "duration":
-                    videos.sort(key=lambda x: x['duration'], reverse=True)
+                    videos.sort(key=lambda x: x["duration"], reverse=True)
                 elif sort_by == "duration_asc":
-                    videos.sort(key=lambda x: x['duration'])
+                    videos.sort(key=lambda x: x["duration"])
                 # recency is already the default order from YouTube
 
                 # Apply limit
                 if limit and limit > 0:
                     videos = videos[:limit]
+
+                # Reindex after filtering/sorting/limiting so display order is consistent.
+                for i, video in enumerate(videos, start=1):
+                    video["index"] = i
 
                 return {
                     "channel": channel_name,
@@ -169,22 +179,70 @@ class YouTubeChannelExplorer:
         return f"{minutes}:{secs:02d}"
 
 
-@click.command('yt-channel')
-@click.argument('channel')
-@click.option('-n', '--limit', type=int, default=20,
-              help='Number of videos to return (default: 20, use 0 for all)')
-@click.option('-s', '--sort', 'sort_by',
-              type=click.Choice(['recency', 'views', 'duration', 'duration_asc']),
-              default='recency', help='Sort order (default: recency)')
-@click.option('-q', '--search', 'search_query', help='Filter videos by title keyword')
-@click.option('-t', '--type', 'content_type',
-              type=click.Choice(['videos', 'shorts', 'streams']),
-              default='videos', help='Content type (default: videos)')
-@click.option('--with-dates', is_flag=True, help='Include upload dates (slower)')
-@click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-@click.option('--ids-only', is_flag=True, help='Output only video IDs (one per line)')
-@click.option('-o', '--output', help='Save output to file')
-@click.option('--quiet', is_flag=True, help='Suppress progress messages')
+def _format_upload_date(upload_date: str) -> str:
+    """Format YYYYMMDD to YYYY-MM-DD"""
+    if len(upload_date) == 8 and upload_date.isdigit():
+        return f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+    return upload_date or "N/A"
+
+
+def _build_plain_output(result: dict, with_dates: bool) -> str:
+    """Build plain text output for non-TTY and file output"""
+    lines = [
+        f"Channel: {result['channel']}",
+        f"Total {result['content_type']}: {result['total_count']}",
+        f"Showing: {result['returned_count']} (sorted by {result['sort']})",
+    ]
+    if result.get("search"):
+        lines.append(f"Search: '{result['search']}'")
+    lines.append("-" * 60)
+
+    for video in result["videos"]:
+        views_str = f"{video['views']:,}" if video["views"] else "N/A"
+        lines.append(
+            f"{video['index']:3d}. [{video['duration_human']:>8}] {video['title']}"
+        )
+        meta = f"     {views_str} views"
+        if with_dates and video.get("upload_date"):
+            meta += f" | {_format_upload_date(video['upload_date'])}"
+        lines.append(meta)
+        lines.append(f"     {video['url']}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip()
+
+
+@click.command("yt-channel")
+@click.argument("channel")
+@click.option(
+    "-n",
+    "--limit",
+    type=int,
+    default=20,
+    help="Number of videos to return (default: 20, use 0 for all)",
+)
+@click.option(
+    "-s",
+    "--sort",
+    "sort_by",
+    type=click.Choice(["recency", "views", "duration", "duration_asc"]),
+    default="recency",
+    help="Sort order (default: recency)",
+)
+@click.option("-q", "--search", "search_query", help="Filter videos by title keyword")
+@click.option(
+    "-t",
+    "--type",
+    "content_type",
+    type=click.Choice(["videos", "shorts", "streams"]),
+    default="videos",
+    help="Content type (default: videos)",
+)
+@click.option("--with-dates", is_flag=True, help="Include upload dates (slower)")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--ids-only", is_flag=True, help="Output only video IDs (one per line)")
+@click.option("-o", "--output", help="Save output to file")
+@click.option("--quiet", is_flag=True, help="Suppress progress messages")
 def yt_channel(
     channel: str,
     limit: int,
@@ -195,7 +253,7 @@ def yt_channel(
     json_output: bool,
     ids_only: bool,
     output: Optional[str],
-    quiet: bool
+    quiet: bool,
 ):
     """Explore a YouTube channel's videos
 
@@ -225,7 +283,7 @@ def yt_channel(
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
-            console=console
+            console=console,
         ) as progress:
             progress.add_task(f"Fetching channel videos...", total=None)
             result = explorer.get_channel_videos(
@@ -257,9 +315,9 @@ def yt_channel(
     # Output formats
     if ids_only:
         # Plain video IDs, one per line (for piping)
-        output_text = '\n'.join(v["id"] for v in result["videos"])
+        output_text = "\n".join(v["id"] for v in result["videos"])
         if output:
-            with open(output, 'w') as f:
+            with open(output, "w") as f:
                 f.write(output_text)
             console.print(f"[green]Saved to {output}[/green]")
         else:
@@ -268,7 +326,7 @@ def yt_channel(
     elif json_output:
         output_text = json.dumps(result, indent=2, ensure_ascii=False)
         if output:
-            with open(output, 'w') as f:
+            with open(output, "w") as f:
                 f.write(output_text)
             console.print(f"[green]Saved to {output}[/green]")
         else:
@@ -276,12 +334,18 @@ def yt_channel(
 
     else:
         # Human-readable output
+        plain_output = _build_plain_output(result, with_dates)
+
         if is_tty:
             # Rich table with clickable titles
             console.print(f"[bold]Channel:[/bold] {result['channel']}")
-            console.print(f"[bold]Total {result['content_type']}:[/bold] {result['total_count']}")
-            console.print(f"[bold]Showing:[/bold] {result['returned_count']} (sorted by {result['sort']})")
-            if result.get('search'):
+            console.print(
+                f"[bold]Total {result['content_type']}:[/bold] {result['total_count']}"
+            )
+            console.print(
+                f"[bold]Showing:[/bold] {result['returned_count']} (sorted by {result['sort']})"
+            )
+            if result.get("search"):
                 console.print(f"[bold]Search:[/bold] '{result['search']}'")
             console.print()
 
@@ -292,35 +356,28 @@ def yt_channel(
             table.add_column("Views", justify="right", width=12)
 
             for video in result["videos"]:
-                views_str = f"{video['views']:,}" if video['views'] else "N/A"
+                views_str = f"{video['views']:,}" if video["views"] else "N/A"
                 # Make title clickable with light blue color
-                title = video['title'][:60] + ("..." if len(video['title']) > 60 else "")
-                clickable_title = f"[link={video['url']}][bright_cyan]{title}[/bright_cyan][/link]"
+                title = video["title"][:60] + (
+                    "..." if len(video["title"]) > 60 else ""
+                )
+                clickable_title = (
+                    f"[link={video['url']}][bright_cyan]{title}[/bright_cyan][/link]"
+                )
                 table.add_row(
-                    str(video['index']),
-                    video['duration_human'],
+                    str(video["index"]),
+                    video["duration_human"],
                     clickable_title,
-                    views_str
+                    views_str,
                 )
 
             console.print(table)
 
         else:
-            print(f"Channel: {result['channel']}")
-            print(f"Total {result['content_type']}: {result['total_count']}")
-            print(f"Showing: {result['returned_count']} (sorted by {result['sort']})")
-            if result.get('search'):
-                print(f"Search: '{result['search']}'")
-            print("-" * 60)
-
-            for video in result["videos"]:
-                views_str = f"{video['views']:,}" if video['views'] else "N/A"
-                print(f"{video['index']:3d}. [{video['duration_human']:>8}] {video['title'][:50]}")
-                print(f"     {views_str} views | {video['url']}")
-                print()
+            print(plain_output)
 
         # Save to file if requested
         if output:
-            with open(output, 'w') as f:
-                f.write(json.dumps(result, indent=2, ensure_ascii=False))
+            with open(output, "w") as f:
+                f.write(plain_output)
             console.print(f"[green]Saved to {output}[/green]")

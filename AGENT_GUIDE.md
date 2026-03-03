@@ -82,6 +82,11 @@ fcrawl yt-channel "@handle"               # List recent videos
 fcrawl yt-channel "@handle" --sort views  # Sort by popularity
 fcrawl yt-channel "@handle" --search "topic"  # Filter by keyword
 fcrawl yt-channel "@handle" --type shorts # Get shorts instead
+
+# Search YouTube directly (query-based)
+fcrawl yt-search "agent engineering"              # Relevance sort
+fcrawl yt-search "agent engineering" --sort date  # Newest videos first
+fcrawl yt-search "agent engineering" --ids-only   # Pipe-friendly IDs
 ```
 
 ### Reddit — Research Threads and Communities

@@ -17,6 +17,7 @@ from .commands.gsearch import gsearch
 from .commands.csearch import csearch
 from .commands.yt_transcript import yt_transcript
 from .commands.yt_channel import yt_channel
+from .commands.yt_search import yt_search
 from .commands.transcribe import transcribe
 from .commands.x import x
 from .commands.reddit import reddit
@@ -68,6 +69,7 @@ cli.add_command(gsearch)
 cli.add_command(csearch)
 cli.add_command(yt_transcript)
 cli.add_command(yt_channel)
+cli.add_command(yt_search)
 cli.add_command(transcribe)
 cli.add_command(x)
 cli.add_command(reddit)

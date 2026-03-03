@@ -357,6 +357,41 @@ fcrawl yt-channel "@3Blue1Brown" --ids-only | head -5    # Pipe video IDs
 
 ---
 
+### `yt-search` — Search YouTube videos
+
+Search YouTube directly via yt-dlp's built-in search extractors.
+
+```bash
+fcrawl yt-search <query> [options]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--limit` | `-n` | Number of videos (default: 20) |
+| `--sort` | `-s` | Sort: `relevance`, `date`, `views`, `duration`, `duration_asc` |
+| `--with-dates` | | Include upload dates (slower) |
+| `--ids-only` | | Output video IDs only (one per line, pipe-friendly) |
+| `--output` | `-o` | Save output to file |
+| `--copy` | | Copy output to clipboard |
+| `--json` | | Output as JSON |
+| `--quiet` | `-q` | Suppress progress |
+
+Notes:
+- `relevance` uses YouTube's native search ranking.
+- `date` uses YouTube's native date-sorted extractor.
+- `views`/`duration` sorts are applied locally after fetch.
+- Output includes channel name and handle/ID when available.
+
+```bash
+fcrawl yt-search "python tutorial"
+fcrawl yt-search "python tutorial" --sort date
+fcrawl yt-search "python tutorial" --sort views -n 10
+fcrawl yt-search "python tutorial" --ids-only | head -5
+fcrawl yt-search "python tutorial" --json -o yt-results.json
+```
+
+---
+
 ### `transcribe` — Local audio/video transcription
 
 Transcribe audio or video files locally using SenseVoice ASR. No API calls, runs entirely on your machine.
@@ -654,6 +689,10 @@ fcrawl search "query" --no-pretty | xargs -I{} fcrawl scrape {}
 # Extract links then scrape each
 fcrawl scrape https://docs.site.com -f links --no-pretty | xargs -I{} fcrawl scrape {} -o docs/{}.md
 
+# YouTube: search then transcript top 5 videos
+fcrawl yt-search "agent engineering" --ids-only | head -5 | \
+  xargs -I{} fcrawl yt-transcript "https://youtube.com/watch?v={}" -o transcripts/{}.txt
+
 # YouTube: get top 5 video IDs from a channel, then transcript each
 fcrawl yt-channel "@channel" --ids-only | head -5 | \
   xargs -I{} fcrawl yt-transcript "https://youtube.com/watch?v={}" -o transcripts/{}.txt
@@ -683,6 +722,7 @@ fcrawl/
 │   │   ├── x.py                    # X/Twitter commands
 │   │   ├── yt_transcript.py        # YouTube transcripts
 │   │   ├── yt_channel.py           # YouTube channel explorer
+│   │   ├── yt_search.py            # YouTube video search
 │   │   └── transcribe.py           # Local ASR transcription
 │   ├── utils/
 │   │   ├── config.py               # Config loading, Firecrawl client
