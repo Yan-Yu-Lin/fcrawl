@@ -150,6 +150,8 @@ def handle_output(
     json_output: bool = False,
     pretty: bool = True,
     format_type: str = "markdown",
+    display_output: bool = True,
+    announce_saved: bool = True,
 ):
     """Handle all output options"""
     # Prepare content for output
@@ -160,24 +162,40 @@ def handle_output(
         format_type = "json"
     else:
         if isinstance(content, dict):
-            # If multiple formats, use the first available
-            for fmt in ["markdown", "html", "links"]:
-                if fmt in content:
-                    output_content = content[fmt]
-                    format_type = fmt
-                    break
+            if format_type == "json":
+                output_content = content
             else:
-                output_content = str(content)
+                # If multiple formats, use the first available
+                for fmt in ["markdown", "html", "links"]:
+                    if fmt in content:
+                        output_content = content[fmt]
+                        format_type = fmt
+                        break
+                else:
+                    output_content = str(content)
         else:
             output_content = content
 
     # Handle output destinations
     if output_file:
-        save_to_file(output_content, output_file, format_type)
+        if announce_saved:
+            save_to_file(output_content, output_file, format_type)
+        else:
+            path = Path(output_file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if format_type == "json":
+                with open(path, "w") as f:
+                    if isinstance(output_content, str):
+                        f.write(output_content)
+                    else:
+                        json.dump(output_content, f, indent=2)
+            else:
+                with open(path, "w") as f:
+                    f.write(str(output_content))
 
     if copy:
         copy_to_clipboard(output_content)
 
-    if not output_file or sys.stdout.isatty():
+    if display_output and (not output_file or sys.stdout.isatty()):
         # Display in terminal if not saving to file, or if interactive
         display_content(output_content, format_type, pretty)
