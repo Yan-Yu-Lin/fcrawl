@@ -179,7 +179,7 @@ def scrape_with_jina(url: str, timeout: int) -> TaggedResult:
 def scrape_with_firecrawl(url: str, scrape_options: dict, timeout: int) -> TaggedResult:
     """Fetch content from Firecrawl with a bounded timeout."""
     client = get_firecrawl_client()
-    result = client.scrape(url, timeout=timeout, **scrape_options)
+    result = client.scrape(url, timeout=timeout * 1000, **scrape_options)
     return TaggedResult(result, provider="firecrawl")
 
 
