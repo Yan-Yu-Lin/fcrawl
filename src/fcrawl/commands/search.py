@@ -55,8 +55,12 @@ def _serper_search(
     locale: Optional[str],
     location: Optional[str],
     api_key: str,
-) -> tuple[list[dict], float, Optional[str], int, str, str]:
-    """Search using Serper with pagination and deduplication."""
+) -> tuple[list[dict], float, Optional[str], int, str, str, dict]:
+    """Search using Serper with pagination and deduplication.
+
+    Returns (results, elapsed, error, pages, gl, hl, extras).
+    extras contains knowledgeGraph, peopleAlsoAsk, relatedSearches from page 1.
+    """
     gl, hl = _parse_locale(locale)
     headers = {
         "X-API-KEY": api_key,
@@ -68,6 +72,7 @@ def _serper_search(
     seen_urls: set[str] = set()
     requests_made = 0
     page = 1
+    extras: dict = {}
 
     try:
         while len(results) < limit:
@@ -99,9 +104,19 @@ def _serper_search(
                     requests_made,
                     gl,
                     hl,
+                    {},
                 )
 
             data = response.json()
+
+            if page == 1:
+                if data.get("knowledgeGraph"):
+                    extras["knowledgeGraph"] = data["knowledgeGraph"]
+                if data.get("peopleAlsoAsk"):
+                    extras["peopleAlsoAsk"] = data["peopleAlsoAsk"]
+                if data.get("relatedSearches"):
+                    extras["relatedSearches"] = data["relatedSearches"]
+
             organic = data.get("organic", [])
             if not organic:
                 break
@@ -113,15 +128,19 @@ def _serper_search(
                     continue
 
                 seen_urls.add(url)
-                results.append(
-                    {
-                        "title": item.get("title", ""),
-                        "url": url,
-                        "description": item.get("snippet", ""),
-                        "position": len(results) + 1,
-                        "engines": ["google"],
-                    }
-                )
+                result_item = {
+                    "title": item.get("title", ""),
+                    "url": url,
+                    "description": item.get("snippet", ""),
+                    "position": len(results) + 1,
+                    "engines": ["google"],
+                }
+                if item.get("date"):
+                    result_item["date"] = item["date"]
+                if item.get("sitelinks"):
+                    result_item["sitelinks"] = item["sitelinks"]
+
+                results.append(result_item)
                 page_added += 1
 
                 if len(results) >= limit:
@@ -133,11 +152,11 @@ def _serper_search(
             page += 1
 
         elapsed = time.time() - start
-        return results[:limit], elapsed, None, requests_made, gl, hl
+        return results[:limit], elapsed, None, requests_made, gl, hl, extras
 
     except requests.RequestException as e:
         elapsed = time.time() - start
-        return [], elapsed, f"Request failed: {str(e)}", requests_made, gl, hl
+        return [], elapsed, f"Request failed: {str(e)}", requests_made, gl, hl, {}
 
 
 def _display_debug_info(
@@ -270,7 +289,7 @@ def search(
             console=console,
         ) as progress:
             progress.add_task(f"Searching '{query}'...", total=None)
-            results, elapsed, error, pages, gl, hl = _serper_search(
+            results, elapsed, error, pages, gl, hl, extras = _serper_search(
                 query=query,
                 limit=limit,
                 locale=locale,
@@ -290,6 +309,7 @@ def search(
             "hl": hl,
             "pages": pages,
             "location": location,
+            "extras": extras,
         }
         write_cache("search", key, cached_data)
 
