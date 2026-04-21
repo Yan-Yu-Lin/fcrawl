@@ -234,6 +234,7 @@ def _display_results(results: list[dict]):
     "--cache-only", "cache_only", is_flag=True, help="Only read from cache, no search"
 )
 @click.option("--debug", is_flag=True, help="Show search provider stats")
+@click.option("--urls-only", is_flag=True, help="Only output URLs (no titles or snippets)")
 def search(
     query: str,
     limit: int,
@@ -245,6 +246,7 @@ def search(
     no_cache: bool,
     cache_only: bool,
     debug: bool,
+    urls_only: bool,
 ):
     """Search the web using Serper.dev (Google API)."""
     pretty = resolve_pretty(pretty)
@@ -315,6 +317,7 @@ def search(
 
     cache_data = cached_data or {}
     results = cache_data.get("results", [])
+    extras = cache_data.get("extras", {})
     elapsed = float(cache_data.get("elapsed", 0.0))
     pages = int(cache_data.get("pages", 0))
     gl = str(cache_data.get("gl", gl))
@@ -353,6 +356,8 @@ def search(
                 "from_cache": from_cache,
             },
         }
+        if extras:
+            output_data["extras"] = extras
         handle_output(
             output_data,
             output_file=output,
@@ -361,5 +366,16 @@ def search(
             format_type="json",
         )
     elif not pretty:
-        for item in results:
-            print(item.get("url", ""))
+        if urls_only:
+            for item in results:
+                print(item.get("url", ""))
+        else:
+            for item in results:
+                url = item.get("url", "")
+                title = item.get("title", "")
+                desc = item.get("description", "")
+                print(url)
+                if title:
+                    print(f"  {title}")
+                if desc:
+                    print(f"  {desc}")
