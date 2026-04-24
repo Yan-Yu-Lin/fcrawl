@@ -57,34 +57,33 @@ def get_scripts_list(text: str):
     # Twitter changed their chunk mapping format:
     # Old: e=>e+"."+{HASH_MAP}[e]+"a.js"
     # New: g.u=e=>(({NAME_MAP}[e]||e)+"."+{HASH_MAP}[e]+"a.js")
+    # Newer: u.u=e=>""+(({NAME_MAP})[e]||e)+"."+({HASH_MAP})[e]+"a.js"
     # Both share [e]+"a.js" as the suffix, so anchor on that.
 
     if '[e]+"a.js"' not in text:
         raise Exception("Could not find chunk mapping in page")
 
-    # Extract the hash map: everything between the last '+"."+' and '[e]+"a.js"'
-    before_suffix = text.split('[e]+"a.js"')[0]
-    # The hash map is the last {...} before [e]
-    hash_start = before_suffix.rfind('+"."+{')
-    if hash_start < 0:
+    before_suffix = text.split('[e]+"a.js"', 1)[0]
+
+    # Extract the hash map: it is the final object literal immediately before
+    # [e]+"a.js". X has alternated between {MAP}[e] and ({MAP})[e].
+    hash_open = before_suffix.rfind("{")
+    hash_close = before_suffix.rfind("}")
+    if hash_open < 0 or hash_close < hash_open:
         raise Exception("Could not find hash map boundary")
 
-    hash_str = before_suffix[hash_start + len('+"."+'):]
-    # Ensure it's a complete JSON object (the raw text already ends with })
-    if not hash_str.rstrip().endswith('}'):
-        hash_str += '}'
+    hash_str = before_suffix[hash_open:hash_close + 1]
     hash_str = _fix_unquoted_keys(hash_str)
 
     # If the new format exists, also extract the name map for chunk names
     name_map = {}
-    name_marker = '({'
-    chunk_expr_start = before_suffix.rfind('=e=>')
+    chunk_expr_start = before_suffix.rfind("=e=>", 0, hash_open)
     if chunk_expr_start >= 0:
-        chunk_expr = before_suffix[chunk_expr_start:]
-        nm_start = chunk_expr.find('({')
-        nm_end = chunk_expr.find('}[e]||e)')
-        if nm_start >= 0 and nm_end >= 0:
-            nm_str = '{' + chunk_expr[nm_start+2:nm_end] + '}'
+        chunk_expr = before_suffix[chunk_expr_start:hash_open]
+        nm_open = chunk_expr.find("{")
+        nm_close = chunk_expr.rfind("}")
+        if nm_open >= 0 and nm_close > nm_open:
+            nm_str = chunk_expr[nm_open:nm_close + 1]
             nm_str = _fix_unquoted_keys(nm_str)
             try:
                 name_map = json.loads(nm_str)
