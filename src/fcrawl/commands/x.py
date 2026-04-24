@@ -41,14 +41,58 @@ def format_number(n: int | None) -> str:
     return f"{n:,}"
 
 
-def display_tweet(tweet: Tweet):
-    """Display a tweet in a formatted way."""
-    console.print("=" * 60)
-    console.print(f"[bold cyan]@{tweet.user.username}[/bold cyan] ({tweet.user.displayname})")
-    console.print(f"[dim]Followers: {format_number(tweet.user.followersCount)} | {tweet.date.strftime('%Y-%m-%d %H:%M:%S')}[/dim]")
-    console.print(f"[blue]{tweet.url}[/blue]")
+def _media_summary(media) -> str | None:
+    """Return a short summary line for tweet media, or None if no media."""
+    if not media:
+        return None
+    bits = []
+    if media.photos:
+        bits.append(f"{len(media.photos)} photo{'s' if len(media.photos) != 1 else ''}")
+    if media.videos:
+        bits.append(f"{len(media.videos)} video{'s' if len(media.videos) != 1 else ''}")
+    if media.animated:
+        bits.append(f"{len(media.animated)} gif{'s' if len(media.animated) != 1 else ''}")
+    return ", ".join(bits) if bits else None
+
+
+def display_tweet(tweet: Tweet, indent: str = ""):
+    """Display a tweet in a formatted way.
+
+    Args:
+        tweet: The tweet to render.
+        indent: Prefix applied to every line. Used for nesting quoted tweets.
+    """
+    console.print(f"{indent}" + "=" * 60)
+    console.print(f"{indent}[bold cyan]@{tweet.user.username}[/bold cyan] ({tweet.user.displayname})")
+    console.print(f"{indent}[dim]Followers: {format_number(tweet.user.followersCount)} | {tweet.date.strftime('%Y-%m-%d %H:%M:%S')}[/dim]")
+    console.print(f"{indent}[blue]{tweet.url}[/blue]")
+
+    # Reply context (when tweet is a reply to someone else)
+    if tweet.inReplyToUser is not None:
+        console.print(f"{indent}[dim]↳ replying to @{tweet.inReplyToUser.username}[/dim]")
+
     console.print()
-    console.print(tweet.rawContent)
+    # rawContent can be multiline; prefix each line with indent for clean nesting
+    for line in tweet.rawContent.splitlines() or [""]:
+        console.print(f"{indent}{line}")
+
+    # Media summary
+    media_line = _media_summary(tweet.media)
+    if media_line:
+        console.print(f"{indent}[dim]📎 {media_line}[/dim]")
+
+    # Quoted tweet (recursive, nested with extra indent)
+    if tweet.quotedTweet is not None:
+        console.print()
+        console.print(f"{indent}[yellow]┌─ Quoting ─────[/yellow]")
+        display_tweet(tweet.quotedTweet, indent=indent + "[yellow]│[/yellow] ")
+        console.print(f"{indent}[yellow]└───────────────[/yellow]")
+
+    # Retweet indicator (retweets wrap the full original; we already rendered the
+    # outer tweet's metadata, so just point at the underlying original)
+    if tweet.retweetedTweet is not None:
+        console.print(f"{indent}[green]🔁 Retweet of {tweet.retweetedTweet.url}[/green]")
+
     console.print()
 
     # Engagement stats
@@ -56,9 +100,11 @@ def display_tweet(tweet: Tweet):
     stats.append(f"[red]<3[/red] {format_number(tweet.likeCount)}")
     stats.append(f"[green]RT[/green] {format_number(tweet.retweetCount)}")
     stats.append(f"[blue]Reply[/blue] {format_number(tweet.replyCount)}")
+    if tweet.quoteCount:
+        stats.append(f"[yellow]Quote[/yellow] {format_number(tweet.quoteCount)}")
     if tweet.viewCount:
         stats.append(f"[dim]Views[/dim] {format_number(tweet.viewCount)}")
-    console.print("  ".join(stats))
+    console.print(f"{indent}" + "  ".join(stats))
 
 
 def display_article(article):
@@ -93,12 +139,46 @@ def display_user(user: User):
     console.print(f"[bold]Tweets:[/bold] {format_number(user.statusesCount)}  [bold]Likes:[/bold] {format_number(user.favouritesCount)}")
 
 
+def _media_to_dict(media) -> dict:
+    """Serialize Media to a simple dict. Empty if no media on the tweet."""
+    if not media:
+        return {}
+    out: dict = {}
+    if media.photos:
+        out["photos"] = [p.url for p in media.photos]
+    if media.videos:
+        videos = []
+        for v in media.videos:
+            # Pick the highest-bitrate mp4 variant as the canonical URL
+            mp4_variants = [
+                var for var in v.variants if var.contentType == "video/mp4"
+            ]
+            best = max(mp4_variants, key=lambda x: x.bitrate, default=None)
+            videos.append({
+                "thumbnail": v.thumbnailUrl,
+                "url": best.url if best else None,
+                "duration_ms": v.duration,
+            })
+        out["videos"] = videos
+    if media.animated:
+        out["gifs"] = [
+            {"thumbnail": g.thumbnailUrl, "url": g.videoUrl}
+            for g in media.animated
+        ]
+    return out
+
+
 def tweet_to_dict(tweet: Tweet) -> dict:
-    """Convert a Tweet to a dictionary for JSON output."""
-    return {
+    """Convert a Tweet to a dictionary for JSON output.
+
+    Recursively serializes quotedTweet and retweetedTweet so the full
+    relational structure of a tweet is preserved (quotes, replies, media).
+    """
+    d: dict = {
         "id": tweet.id,
         "url": tweet.url,
         "date": tweet.date.isoformat(),
+        "lang": tweet.lang,
         "user": {
             "username": tweet.user.username,
             "displayname": tweet.user.displayname,
@@ -108,9 +188,29 @@ def tweet_to_dict(tweet: Tweet) -> dict:
         "likeCount": tweet.likeCount,
         "retweetCount": tweet.retweetCount,
         "replyCount": tweet.replyCount,
+        "quoteCount": tweet.quoteCount,
+        "bookmarkedCount": tweet.bookmarkedCount,
         "viewCount": tweet.viewCount,
         "hashtags": tweet.hashtags,
     }
+
+    media = _media_to_dict(tweet.media)
+    if media:
+        d["media"] = media
+
+    if tweet.inReplyToUser is not None:
+        d["inReplyTo"] = {
+            "username": tweet.inReplyToUser.username,
+            "tweetId": tweet.inReplyToTweetIdStr,
+        }
+
+    if tweet.quotedTweet is not None:
+        d["quotedTweet"] = tweet_to_dict(tweet.quotedTweet)
+
+    if tweet.retweetedTweet is not None:
+        d["retweetedTweet"] = tweet_to_dict(tweet.retweetedTweet)
+
+    return d
 
 
 def user_to_dict(user: User) -> dict:
