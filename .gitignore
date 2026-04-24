@@ -65,6 +65,9 @@ venv.bak/
 # Project specific
 *.log
 output/
+# Stray twscrape DB when fcrawl is run from repo root
+accounts.db
+*.db
 *.json
 *.md
 !README.md
