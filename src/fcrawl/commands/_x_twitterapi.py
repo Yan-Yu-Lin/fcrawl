@@ -19,6 +19,7 @@ from rich.console import Console
 from ..utils.config import get_twitterapi_io_key
 from ..vendors.twitterapi_io import (
     AuthError,
+    InsufficientCreditsError,
     NotFoundError,
     RateLimitedError,
     TwitterApiClient,
@@ -63,6 +64,15 @@ def _run_async(coro):
             "Check that your TWITTERAPI_IO_KEY is valid and has not expired."
         )
         raise click.Abort()
+    except InsufficientCreditsError as e:
+        console.print(f"[red]Out of credits on twitterapi.io: {e}[/red]")
+        console.print(
+            "Recharge at [blue]https://twitterapi.io/dashboard[/blue]\n"
+            "  • $1  → ~100,000 credits (~6,600 tweet lookups)\n"
+            "  • $5  → ~500,000 credits (years of personal use)\n"
+            "Current balance is visible on the dashboard."
+        )
+        raise click.Abort()
     except NotFoundError:
         # Caller usually treats this as "no result"; re-raise for upstream
         # to show a yellow warning rather than a red abort.
@@ -98,9 +108,11 @@ async def _fetch_thread_and_replies(
     twscrape's manual chain-walking logic. Replies from other users go
     through the replies/v2 endpoint.
     """
-    # Step 1: thread context gives us the author's chain.
+    # Step 1: thread context gives us the author's chain. Cap at ~40
+    # tweets (2 pages of 20) — real author threads rarely exceed that,
+    # and each page is billable.
     thread_raw: list[dict] = []
-    async for t in client.tweet_thread_context(tweet_id):
+    async for t in client.tweet_thread_context(tweet_id, max_results=40):
         thread_raw.append(t)
 
     # Step 2: if the anchor tweet isn't in the thread_context response,

@@ -16,6 +16,7 @@ import pytest
 
 from fcrawl.commands.x import display_tweet, display_user, tweet_to_dict, user_to_dict
 from fcrawl.vendors.twitterapi_io import to_tweet, to_user
+from fcrawl.vendors.twitterapi_io.client import MAX_PAGES_UNBOUNDED, _pages_for_limit
 from fcrawl.vendors.twscrape import Tweet, User
 
 FIXTURES = Path(__file__).parent / "fixtures" / "twitterapi_io"
@@ -189,6 +190,28 @@ def test_user_to_dict_serializes(capsys):
     data = user_to_dict(u)
     assert data["username"] == "anthropicai"
     json.dumps(data, default=str)
+
+
+# ---- pagination safety (the credit-bleed fix) ------------------------------
+
+@pytest.mark.parametrize("limit,expected_pages", [
+    (None, MAX_PAGES_UNBOUNDED),
+    (0, 0),
+    (1, 1),
+    (20, 1),      # exactly one page
+    (21, 2),      # barely needs a second page
+    (40, 2),
+    (41, 3),
+    (100, 5),
+])
+def test_pages_for_limit_minimizes_billable_fetches(limit, expected_pages):
+    """Regression test for the -602 credits incident.
+
+    Each extra page = billed credits, regardless of how many results the
+    caller consumes. `_pages_for_limit` must cap fetches to the minimum
+    needed to satisfy the limit.
+    """
+    assert _pages_for_limit(limit) == expected_pages
 
 
 # ---- recursive quote safety -------------------------------------------------

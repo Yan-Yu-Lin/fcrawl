@@ -16,6 +16,8 @@ Base URL: https://api.twitterapi.io
 from .client import TwitterApiClient
 from .errors import (
     AuthError,
+    BadRequestError,
+    InsufficientCreditsError,
     NotFoundError,
     RateLimitedError,
     TwitterAPIError,
@@ -28,6 +30,8 @@ __all__ = [
     "RateLimitedError",
     "NotFoundError",
     "AuthError",
+    "BadRequestError",
+    "InsufficientCreditsError",
     "to_tweet",
     "to_user",
 ]

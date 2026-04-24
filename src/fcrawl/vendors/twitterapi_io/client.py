@@ -28,6 +28,7 @@ import httpx
 from .errors import (
     AuthError,
     BadRequestError,
+    InsufficientCreditsError,
     NotFoundError,
     RateLimitedError,
     TwitterAPIError,
@@ -35,9 +36,18 @@ from .errors import (
 
 BASE_URL = "https://api.twitterapi.io"
 
-# Conservative retry schedule. Exponential with jitter is overkill for a
-# personal CLI — deterministic waits are easier to reason about in logs.
+# Retry schedule used ONLY for 429 / 5xx. We intentionally do NOT retry on
+# TransportError / TimeoutException because twitterapi.io bills for work the
+# server completes — even if our client times out reading the response, the
+# server has already generated the data and charged credits. Retrying on
+# timeout = double-billing (in practice: 5x-billing with default max_retries).
+# See: investigation of the `-602 credits` incident, 2026-04-25.
 _RETRY_WAITS = (1.0, 2.0, 5.0, 10.0)  # seconds
+
+# Their `user_last_tweets` / `advanced_search` / `thread_context` endpoints
+# routinely take 12-30+ seconds under load. Default HTTP timeout must be
+# generous enough to avoid false "timeout" → retry → double-bill cycles.
+DEFAULT_TIMEOUT = 90.0
 
 
 class TwitterApiClient:
@@ -53,7 +63,7 @@ class TwitterApiClient:
         api_key: str,
         *,
         base_url: str = BASE_URL,
-        timeout: float = 30.0,
+        timeout: float = DEFAULT_TIMEOUT,
         max_retries: int = 4,
     ):
         if not api_key:
@@ -90,23 +100,25 @@ class TwitterApiClient:
     # ---- low-level GET with retry/error mapping ----------------------------
 
     async def _get(self, path: str, params: dict[str, Any] | None = None) -> dict:
-        """GET a JSON endpoint. Retries on 429/5xx. Raises on persistent errors."""
+        """GET a JSON endpoint. Retries on 429/5xx only. NEVER retries on network
+        errors because twitterapi.io bills for server-side work even if the
+        client fails to receive the response."""
         client = self._require_client()
         # Drop None values so httpx doesn't serialize them as 'None'.
         clean_params = (
             {k: v for k, v in params.items() if v is not None} if params else None
         )
 
-        last_exc: Exception | None = None
         for attempt in range(self._max_retries + 1):
             try:
                 resp = await client.get(path, params=clean_params)
             except (httpx.TransportError, httpx.TimeoutException) as e:
-                last_exc = e
-                if attempt >= self._max_retries:
-                    raise TwitterAPIError(f"Network error: {e}") from e
-                await asyncio.sleep(_RETRY_WAITS[min(attempt, len(_RETRY_WAITS) - 1)])
-                continue
+                # DO NOT RETRY. The server likely completed the work and
+                # charged credits — retrying would double-bill. Fail fast
+                # and let the user retry manually if they want to pay again.
+                raise TwitterAPIError(
+                    f"Network error (request may still have been billed): {e}"
+                ) from e
 
             if resp.status_code == 200:
                 try:
@@ -121,6 +133,15 @@ class TwitterApiClient:
                     "Unauthorized — check your twitterapi.io API key",
                     status_code=401,
                     payload=_safe_json(resp),
+                )
+
+            if resp.status_code == 402:
+                body = _safe_json(resp)
+                raise InsufficientCreditsError(
+                    body.get("message") or "Credits exhausted on twitterapi.io. "
+                    "Recharge at https://twitterapi.io/dashboard",
+                    status_code=402,
+                    payload=body,
                 )
 
             if resp.status_code == 404:
@@ -139,6 +160,9 @@ class TwitterApiClient:
                 )
 
             if resp.status_code == 429 or resp.status_code >= 500:
+                # 429/5xx are cases where the server explicitly told us
+                # "try again" — retry is safe because no billable work
+                # completed (or they've promised not to charge).
                 if attempt >= self._max_retries:
                     cls = RateLimitedError if resp.status_code == 429 else TwitterAPIError
                     raise cls(
@@ -157,7 +181,7 @@ class TwitterApiClient:
             )
 
         # Unreachable in normal flow — safety net.
-        raise TwitterAPIError(f"Retry loop exited without response: {last_exc}")
+        raise TwitterAPIError("Retry loop exited without response")
 
     # ---- tweet endpoints ---------------------------------------------------
 
@@ -186,12 +210,13 @@ class TwitterApiClient:
     ) -> AsyncIterator[dict]:
         """Advanced search. Yields tweet dicts until exhausted or limit hit.
 
+        Page size is fixed at 20 on twitterapi.io's side. If ``max_results``
+        is <= 20 we fetch exactly one page (each extra page = billed credits,
+        regardless of how many results the caller actually consumes).
+
         twitterapi.io recommends combining ``since_time``/``until_time`` into
-        the ``query`` itself (e.g. ``"AI since_time:1776045662 until_time:..."``)
-        rather than passing them as separate params — cursor pagination on
-        historical data is buggy on their side. This wrapper accepts both
-        forms for convenience; when since_time/until_time kwargs are given,
-        they're merged into the query string.
+        the ``query`` itself rather than passing them as separate params;
+        their cursor pagination on historical data is buggy.
         """
         q = query
         if since_time is not None:
@@ -199,9 +224,10 @@ class TwitterApiClient:
         if until_time is not None:
             q += f" until_time:{until_time}"
 
+        max_pages = _pages_for_limit(max_results)
         cursor = ""
         yielded = 0
-        while True:
+        for _ in range(max_pages):
             data = await self._get(
                 "/twitter/tweet/advanced_search",
                 {"query": q, "queryType": query_type, "cursor": cursor or None},
@@ -225,10 +251,12 @@ class TwitterApiClient:
         query_type: str = "Latest",
         max_results: int | None = None,
     ) -> AsyncIterator[dict]:
-        """Fetch replies to a tweet. Yields reply tweet dicts."""
+        """Fetch replies to a tweet. Yields reply tweet dicts. Capped at
+        enough pages to satisfy ``max_results`` (each page = billable work)."""
+        max_pages = _pages_for_limit(max_results)
         cursor = ""
         yielded = 0
-        while True:
+        for _ in range(max_pages):
             data = await self._get(
                 "/twitter/tweet/replies/v2",
                 {
@@ -257,15 +285,13 @@ class TwitterApiClient:
     ) -> AsyncIterator[dict]:
         """Fetch the thread context (parents + siblings) of a tweet.
 
-        Returns tweets in the order twitterapi.io provides them (roughly
-        chronological by position in the thread).
+        Page count capped by ``max_results`` to limit credit spend. Each
+        page is billable regardless of how many tweets the caller consumes.
         """
+        max_pages = _pages_for_limit(max_results)
         cursor = ""
         yielded = 0
-        # Safety valve: has_next_page can lie per their docs, so cap loop.
-        hard_cap = 50
-        loops = 0
-        while loops < hard_cap:
+        for _ in range(max_pages):
             data = await self._get(
                 "/twitter/tweet/thread_context",
                 {"tweetId": str(tweet_id), "cursor": cursor or None},
@@ -284,7 +310,6 @@ class TwitterApiClient:
             if not next_cursor or next_cursor == cursor:
                 return
             cursor = next_cursor
-            loops += 1
 
     # ---- user endpoints ----------------------------------------------------
 
@@ -305,13 +330,18 @@ class TwitterApiClient:
         """Fetch a user's recent tweets. Pass either user_name or user_id.
 
         user_id is preferred (more stable per twitterapi.io docs).
+
+        Page size is fixed at 20 on their side and every page is billable.
+        We compute the minimum number of pages needed to satisfy
+        ``max_results`` and stop there.
         """
         if not user_name and not user_id:
             raise ValueError("user_last_tweets requires user_name or user_id")
 
+        max_pages = _pages_for_limit(max_results)
         cursor = ""
         yielded = 0
-        while True:
+        for _ in range(max_pages):
             params = {
                 "cursor": cursor or None,
                 "includeReplies": str(include_replies).lower(),
@@ -342,3 +372,26 @@ def _safe_json(resp: httpx.Response) -> dict:
     except ValueError:
         return {"_raw": resp.text[:500]}
     return parsed if isinstance(parsed, dict) else {"_list": parsed}
+
+
+# twitterapi.io page size is fixed at 20 per page across their paginated
+# endpoints. Every page request is billed server-side — even if the caller
+# only consumes a fraction of the returned tweets. To avoid over-spending,
+# paginating clients should request the minimum pages sufficient for
+# ``max_results``.
+PAGE_SIZE = 20
+MAX_PAGES_UNBOUNDED = 10  # safety cap when max_results is None
+
+
+def _pages_for_limit(max_results: int | None) -> int:
+    """Return the minimum number of pages needed to satisfy max_results.
+
+    max_results=None is treated as "unbounded" but still capped at
+    MAX_PAGES_UNBOUNDED to prevent runaway spend.
+    """
+    if max_results is None:
+        return MAX_PAGES_UNBOUNDED
+    if max_results <= 0:
+        return 0
+    # Ceiling division.
+    return max(1, (max_results + PAGE_SIZE - 1) // PAGE_SIZE)

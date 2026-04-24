@@ -24,3 +24,10 @@ class RateLimitedError(TwitterAPIError):
 
 class BadRequestError(TwitterAPIError):
     """Raised on 400 Bad Request — malformed query or unsupported params."""
+
+
+class InsufficientCreditsError(TwitterAPIError):
+    """Raised on 402 Payment Required — twitterapi.io balance exhausted.
+
+    Users should recharge at https://twitterapi.io/dashboard.
+    """
