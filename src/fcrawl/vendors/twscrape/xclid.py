@@ -48,16 +48,57 @@ def script_url(k: str, v: str):
     return f"https://abs.twimg.com/responsive-web/client-web/{k}.{v}.js"
 
 
+def _fix_unquoted_keys(s: str) -> str:
+    """Fix unquoted JS object keys so the string can be parsed as JSON."""
+    return re.sub(r'([{,])\s*([^"{,}\s][^:,}]*?)\s*:', r'\1"\2":', s)
+
+
 def get_scripts_list(text: str):
-    scripts = text.split('e=>e+"."+')[1].split('[e]+"a.js"')[0]
-    # Fix unquoted JavaScript keys (X changed their format)
-    # e.g., node_modules_foo:"abc" -> "node_modules_foo":"abc"
-    scripts = re.sub(r',([a-zA-Z_][a-zA-Z0-9_]*):', r',"\1":', scripts)
+    # Twitter changed their chunk mapping format:
+    # Old: e=>e+"."+{HASH_MAP}[e]+"a.js"
+    # New: g.u=e=>(({NAME_MAP}[e]||e)+"."+{HASH_MAP}[e]+"a.js")
+    # Both share [e]+"a.js" as the suffix, so anchor on that.
+
+    if '[e]+"a.js"' not in text:
+        raise Exception("Could not find chunk mapping in page")
+
+    # Extract the hash map: everything between the last '+"."+' and '[e]+"a.js"'
+    before_suffix = text.split('[e]+"a.js"')[0]
+    # The hash map is the last {...} before [e]
+    hash_start = before_suffix.rfind('+"."+{')
+    if hash_start < 0:
+        raise Exception("Could not find hash map boundary")
+
+    hash_str = before_suffix[hash_start + len('+"."+'):]
+    # Ensure it's a complete JSON object (the raw text already ends with })
+    if not hash_str.rstrip().endswith('}'):
+        hash_str += '}'
+    hash_str = _fix_unquoted_keys(hash_str)
+
+    # If the new format exists, also extract the name map for chunk names
+    name_map = {}
+    name_marker = '({'
+    chunk_expr_start = before_suffix.rfind('=e=>')
+    if chunk_expr_start >= 0:
+        chunk_expr = before_suffix[chunk_expr_start:]
+        nm_start = chunk_expr.find('({')
+        nm_end = chunk_expr.find('}[e]||e)')
+        if nm_start >= 0 and nm_end >= 0:
+            nm_str = '{' + chunk_expr[nm_start+2:nm_end] + '}'
+            nm_str = _fix_unquoted_keys(nm_str)
+            try:
+                name_map = json.loads(nm_str)
+            except json.JSONDecodeError:
+                pass  # Fall back to hash-only mode
+
     try:
-        for k, v in json.loads(scripts).items():
-            yield script_url(k, f"{v}a")
-    except json.decoder.JSONDecodeError as e:
+        hash_map = json.loads(hash_str)
+    except json.JSONDecodeError as e:
         raise Exception("Failed to parse scripts") from e
+
+    for k, v in hash_map.items():
+        chunk_name = name_map.get(k, k)
+        yield script_url(chunk_name, f"{v}a")
 
 
 # MARK: XClientTxId parsing
