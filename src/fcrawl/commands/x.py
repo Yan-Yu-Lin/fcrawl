@@ -16,8 +16,15 @@ from ..utils.output import handle_output, save_to_file
 from ..utils.x_client import get_x_api, get_x_db_path, get_x_pool
 from ..vendors.twscrape import NoAccountError, Tweet, User
 from ..vendors.twscrape.models import parse_tweet
+from . import _x_twitterapi as twitterapi_backend
 
 console = Console()
+
+# Choices shared by every x subcommand that supports backend switching.
+# Default stays 'twscrape' to preserve existing behavior for users without
+# a twitterapi.io API key.
+PROVIDER_CHOICES = ['twscrape', 'twitterapi']
+PROVIDER_DEFAULT = 'twscrape'
 
 
 def extract_tweet_id(id_or_url: str) -> int:
@@ -152,9 +159,11 @@ def x():
 @click.option('--limit', '-l', type=int, default=20, help='Maximum number of results')
 @click.option('--sort', type=click.Choice(['top', 'latest', 'photos', 'videos']), default='top',
               help='Sort order (default: top)')
+@click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
+              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-def x_search(query: str, limit: int, sort: str, output: Optional[str], json_output: bool):
+def x_search(query: str, limit: int, sort: str, provider: str, output: Optional[str], json_output: bool):
     """Search for tweets on X/Twitter.
 
     \b
@@ -162,7 +171,40 @@ def x_search(query: str, limit: int, sort: str, output: Optional[str], json_outp
         fcrawl x search "Claude Code"
         fcrawl x search "AI news" --limit 50 --sort top
         fcrawl x search "python" -o results.json --json
+        fcrawl x search "claude code" --provider twitterapi
     """
+    # twitterapi backend: short-circuit to the helper module. The twitterapi
+    # backend does its own API-key check + error translation; sort option is
+    # mapped inside fetch_search() so we don't need product mapping here.
+    if provider == 'twitterapi':
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            progress.add_task(f"Searching for '{query}' (twitterapi.io)...", total=None)
+            tweets = twitterapi_backend.fetch_search(query, limit=limit, sort=sort)
+            progress.stop()
+
+        if not tweets:
+            console.print("[yellow]No tweets found[/yellow]")
+            return
+
+        console.print(f"[green]Found {len(tweets)} tweets[/green]")
+
+        if json_output or output:
+            data = [tweet_to_dict(t) for t in tweets]
+            if output:
+                save_to_file(json.dumps(data, indent=2), output, 'json')
+            if json_output and not output:
+                console.print_json(json.dumps(data, indent=2))
+        else:
+            for tweet in tweets:
+                display_tweet(tweet)
+            console.print("=" * 60)
+        return
+
+    # twscrape backend (original path) -----------------------------------
     # Map sort options to X API product values
     sort_map = {
         'top': 'Top',
@@ -226,9 +268,11 @@ def x_search(query: str, limit: int, sort: str, output: Optional[str], json_outp
 @click.option('--thread', is_flag=True, help='Fetch full thread (author replies)')
 @click.option('--with-replies', is_flag=True, help='Include replies from other users (use with --thread)')
 @click.option('--reply-limit', type=int, default=30, help='Max replies to fetch (default: 30)')
+@click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
+              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, output: Optional[str], json_output: bool):
+def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, provider: str, output: Optional[str], json_output: bool):
     """Fetch a single tweet by ID or URL.
 
     \b
@@ -237,12 +281,93 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
         fcrawl x tweet https://x.com/user/status/1234567890
         fcrawl x tweet 1234567890 --thread  # Fetch full thread
         fcrawl x tweet 1234567890 --thread --with-replies  # Thread + other replies
+        fcrawl x tweet 1234567890 --provider twitterapi
     """
     try:
         tweet_id = extract_tweet_id(id_or_url)
     except ValueError:
         console.print(f"[red]Invalid tweet ID or URL: {id_or_url}[/red]")
         raise click.Abort()
+
+    # twitterapi backend: short-circuit to the helper module and return. The
+    # twitterapi path doesn't support the article-parsing that twscrape does,
+    # so we omit that block when using this provider.
+    if provider == 'twitterapi':
+        # Validate flag combo (same rule as twscrape path).
+        if with_replies and not thread:
+            console.print("[yellow]--with-replies requires --thread flag[/yellow]")
+            with_replies = False
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            desc = (
+                f"Fetching thread + replies {tweet_id} (twitterapi.io)..."
+                if with_replies
+                else f"Fetching thread {tweet_id} (twitterapi.io)..."
+                if thread
+                else f"Fetching tweet {tweet_id} (twitterapi.io)..."
+            )
+            progress.add_task(desc, total=None)
+
+            if thread:
+                tweets, replies = twitterapi_backend.fetch_thread_and_replies(
+                    tweet_id, with_replies=with_replies, reply_limit=reply_limit
+                )
+                if not tweets:
+                    progress.stop()
+                    console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
+                    return
+            else:
+                single = twitterapi_backend.fetch_tweet(tweet_id)
+                if not single:
+                    progress.stop()
+                    console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
+                    return
+                tweets = [single]
+                replies = []
+
+            progress.stop()
+            if thread:
+                msg = f"[green]Found {len(tweets)} tweets in thread[/green]"
+                if replies:
+                    msg += f" [dim]+ {len(replies)} replies[/dim]"
+                console.print(msg)
+
+        if json_output or output:
+            if thread and with_replies:
+                data = {
+                    "thread": [tweet_to_dict(t) for t in tweets],
+                    "replies": [tweet_to_dict(t) for t in replies],
+                }
+            elif thread:
+                data = [tweet_to_dict(t) for t in tweets]
+            else:
+                data = tweet_to_dict(tweets[0])
+            if output:
+                save_to_file(json.dumps(data, indent=2), output, 'json')
+            if json_output and not output:
+                console.print_json(json.dumps(data, indent=2))
+        else:
+            for t in tweets:
+                display_tweet(t)
+            if thread and len(tweets) > 1:
+                console.print(
+                    f"\n[dim]Thread: {len(tweets)} tweets from @{tweets[0].user.username}[/dim]"
+                )
+            if replies:
+                console.print("\n" + "─" * 60)
+                console.print(
+                    f"[bold]Replies[/bold] [dim]({len(replies)} sorted by likes)[/dim]"
+                )
+                console.print("─" * 60)
+                for t in replies:
+                    display_tweet(t)
+        return
+
+    # twscrape backend (original path below) -----------------------------
 
     async def _fetch():
         api = get_x_api()
@@ -566,19 +691,48 @@ def x_article(id_or_url: str, output: Optional[str], json_output: bool, raw: boo
 
 @x.command(name='user')
 @click.argument('handle')
+@click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
+              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-def x_user(handle: str, output: Optional[str], json_output: bool):
+def x_user(handle: str, provider: str, output: Optional[str], json_output: bool):
     """Fetch a user profile by handle.
 
     \b
     Examples:
         fcrawl x user elonmusk
         fcrawl x user anthropic --json
+        fcrawl x user anthropic --provider twitterapi
     """
     # Remove @ if present
     handle = handle.lstrip('@')
 
+    # twitterapi backend: short-circuit to the helper module.
+    if provider == 'twitterapi':
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            progress.add_task(f"Fetching user @{handle} (twitterapi.io)...", total=None)
+            user = twitterapi_backend.fetch_user(handle)
+            progress.stop()
+
+        if not user:
+            console.print(f"[yellow]User @{handle} not found[/yellow]")
+            return
+
+        if json_output or output:
+            data = user_to_dict(user)
+            if output:
+                save_to_file(json.dumps(data, indent=2), output, 'json')
+            if json_output and not output:
+                console.print_json(json.dumps(data, indent=2))
+        else:
+            display_user(user)
+        return
+
+    # twscrape backend (original path) -----------------------------------
     async def _fetch():
         api = get_x_api()
         return await api.user_by_login(handle)
@@ -620,19 +774,55 @@ def x_user(handle: str, output: Optional[str], json_output: bool):
 @x.command(name='tweets')
 @click.argument('handle')
 @click.option('--limit', '-l', type=int, default=20, help='Maximum number of tweets')
+@click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
+              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
-def x_tweets(handle: str, limit: int, output: Optional[str], json_output: bool):
+def x_tweets(handle: str, limit: int, provider: str, output: Optional[str], json_output: bool):
     """Fetch tweets from a user's timeline.
 
     \b
     Examples:
         fcrawl x tweets anthropic
         fcrawl x tweets elonmusk --limit 50
+        fcrawl x tweets anthropic --provider twitterapi
     """
     # Remove @ if present
     handle = handle.lstrip('@')
 
+    # twitterapi backend: short-circuit to the helper module.
+    if provider == 'twitterapi':
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console
+        ) as progress:
+            progress.add_task(f"Fetching tweets from @{handle} (twitterapi.io)...", total=None)
+            user, tweets = twitterapi_backend.fetch_user_tweets(handle, limit=limit)
+            progress.stop()
+
+        if user is None:
+            console.print(f"[yellow]User @{handle} not found[/yellow]")
+            return
+        if not tweets:
+            console.print(f"[yellow]No tweets found for @{handle}[/yellow]")
+            return
+
+        console.print(f"[green]Found {len(tweets)} tweets from @{handle}[/green]")
+
+        if json_output or output:
+            data = [tweet_to_dict(t) for t in tweets]
+            if output:
+                save_to_file(json.dumps(data, indent=2), output, 'json')
+            if json_output and not output:
+                console.print_json(json.dumps(data, indent=2))
+        else:
+            for tweet in tweets:
+                display_tweet(tweet)
+            console.print("=" * 60)
+        return
+
+    # twscrape backend (original path) -----------------------------------
     async def _fetch():
         api = get_x_api()
         # First get the user to get their ID

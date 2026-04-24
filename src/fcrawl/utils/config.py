@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
     "api_url": "http://localhost:3002",
     "api_key": None,
     "serper_api_key": None,
+    "twitterapi_io_key": None,
     "default_format": "markdown",
     "cache_enabled": False,
     "cache_duration": 3600,  # 1 hour in seconds
@@ -62,7 +63,23 @@ def load_config() -> Dict[str, Any]:
     if os.getenv("FCRAWL_YT_COOKIES_FROM_BROWSER"):
         config["yt_cookies_from_browser"] = os.getenv("FCRAWL_YT_COOKIES_FROM_BROWSER")
 
+    # twitterapi.io (alternative X/Twitter backend for `fcrawl x` commands)
+    if os.getenv("TWITTERAPI_IO_KEY"):
+        config["twitterapi_io_key"] = os.getenv("TWITTERAPI_IO_KEY")
+
     return config
+
+
+def get_twitterapi_io_key() -> str:
+    """Get twitterapi.io API key from env var or config file.
+
+    Returns empty string if not configured; callers should check and
+    surface a clear error (e.g. `fcrawl x tweet --provider twitterapi`
+    without a configured key should fail with guidance, not a TypeError).
+    """
+    if os.environ.get("TWITTERAPI_IO_KEY"):
+        return os.environ["TWITTERAPI_IO_KEY"]
+    return load_config().get("twitterapi_io_key") or ""
 
 
 def save_config(config: Dict[str, Any], path: Optional[Path] = None):
