@@ -25,6 +25,10 @@ from typing import Any
 
 from ..twscrape.models import (
     Media,
+    MediaAnimated,
+    MediaPhoto,
+    MediaVideo,
+    MediaVideoVariant,
     TextLink,
     Tweet,
     User,
@@ -38,12 +42,27 @@ _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def _parse_date(value: Any) -> datetime:
-    """Parse twitterapi.io's RFC-2822-ish createdAt. Returns epoch on failure."""
+    """Parse twitterapi.io's createdAt. Handles two formats they use:
+      - RFC-2822 "Tue Dec 10 07:00:30 +0000 2024"  (tweet endpoints)
+      - ISO-8601 "2021-01-25T22:45:28.000000Z"     (user endpoints)
+    Returns epoch on failure.
+    """
     if not value:
         return _EPOCH
+    # Try ISO-8601 first (fastest when applicable).
+    try:
+        # fromisoformat() in py3.11+ handles the trailing Z, but to be safe
+        # across minor versions we normalize it to +00:00 explicitly.
+        iso = value.replace("Z", "+00:00") if isinstance(value, str) else value
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except (TypeError, ValueError):
+        pass
+    # Fall back to RFC-2822.
     try:
         dt = email.utils.parsedate_to_datetime(value)
-        # Normalize naive → UTC
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
@@ -85,16 +104,20 @@ def to_user(obj: dict) -> User:
     user_id_str = str(obj.get("id") or "0")
     profile_url = obj.get("url") or f"https://x.com/{screen_name}"
 
-    # Optional description links live under profile_bio.entities
+    # Description links live under either `entities.description.urls`
+    # (the /user/info response shape) or `profile_bio.entities.description.urls`
+    # (the shape embedded inside tweet author blocks). Check both.
     bio = obj.get("profile_bio") or {}
     bio_entities = (bio.get("entities") or {}).get("description") or {}
+    top_entities = (obj.get("entities") or {}).get("description") or {}
+    url_sources = (bio_entities.get("urls") or []) + (top_entities.get("urls") or [])
     desc_links = [
         TextLink(
             url=link.get("expanded_url") or link.get("url") or "",
             text=link.get("display_url"),
             tcourl=link.get("url"),
         )
-        for link in (bio_entities.get("urls") or [])
+        for link in url_sources
         if link.get("expanded_url") or link.get("url")
     ]
 
@@ -102,6 +125,11 @@ def to_user(obj: dict) -> User:
     pinned_ids = [_int(x) for x in pinned_ids_raw if _int(x) > 0]
 
     is_blue = obj.get("isBlueVerified")
+    # The /user/info endpoint exposes `isVerified` (legacy checkmark) AND
+    # `isBlueVerified` (paid blue). Tweet-embedded authors sometimes only
+    # return the latter. Prefer the legacy flag when present; otherwise
+    # fall back to blue as a sensible approximation.
+    is_legacy_verified = obj.get("isVerified")
 
     return User(
         id=_int(user_id_str),
@@ -120,8 +148,8 @@ def to_user(obj: dict) -> User:
         location=obj.get("location") or "",
         profileImageUrl=obj.get("profilePicture") or "",
         profileBannerUrl=obj.get("coverPicture") or None,
-        protected=None,  # twitterapi.io doesn't expose protected state
-        verified=is_blue,  # approximate: no legacy-verified flag anymore
+        protected=obj.get("protected"),
+        verified=is_legacy_verified if is_legacy_verified is not None else is_blue,
         blue=is_blue,
         blueType=obj.get("verifiedType") or None,
         descriptionLinks=desc_links,
@@ -131,17 +159,73 @@ def to_user(obj: dict) -> User:
 
 # ---- tweet mapper ----------------------------------------------------------
 
-def to_media(tweet_obj: dict) -> Media:  # noqa: ARG001
+def _video_variant(v: dict) -> MediaVideoVariant | None:
+    """Build a MediaVideoVariant from a video_info.variants[i] dict, or None."""
+    content_type = v.get("content_type")
+    url = v.get("url")
+    if not content_type or not url:
+        return None
+    return MediaVideoVariant(
+        contentType=content_type,
+        bitrate=int(v.get("bitrate") or 0),
+        url=url,
+    )
+
+
+def to_media(tweet_obj: dict) -> Media:
     """Build a Media instance from a tweet dict.
 
-    TODO: twitterapi.io's OpenAPI schema does NOT document photo/video URL
-    fields on the Tweet object. Live responses may still include
-    ``extendedEntities`` / ``extended_entities`` with media URLs — verify
-    once an API key is available and extend this function accordingly.
-    Until then, return an empty Media so downstream rendering shows no
-    media attachment line (rather than crashing).
+    twitterapi.io's OpenAPI schema does NOT document media fields, but
+    live responses return an ``extendedEntities.media[]`` block with the
+    same internal-Twitter-API shape that twscrape's own parser handles.
+    We mirror twscrape's Media.parse() logic here (different top-level
+    key — camelCase vs snake_case — same content).
+
+    Verified shape (type: "photo" | "video" | "animated_gif"):
+        - media_url_https:        thumbnail / photo URL
+        - video_info.duration_millis
+        - video_info.variants[]:  [{content_type, bitrate, url}]
     """
-    return Media(photos=[], videos=[], animated=[])
+    extended = tweet_obj.get("extendedEntities") or tweet_obj.get("extended_entities")
+    if not extended:
+        return Media(photos=[], videos=[], animated=[])
+
+    photos: list[MediaPhoto] = []
+    videos: list[MediaVideo] = []
+    animated: list[MediaAnimated] = []
+
+    for m in extended.get("media") or []:
+        media_type = m.get("type")
+        url = m.get("media_url_https")
+
+        if media_type == "photo":
+            if url:
+                photos.append(MediaPhoto(url=url))
+
+        elif media_type == "video":
+            vinfo = m.get("video_info") or {}
+            variants = [
+                v for v in (_video_variant(x) for x in vinfo.get("variants") or [])
+                if v is not None and v.contentType == "video/mp4"
+            ]
+            videos.append(MediaVideo(
+                thumbnailUrl=url or "",
+                variants=variants,
+                duration=int(vinfo.get("duration_millis") or 0),
+                views=None,
+            ))
+
+        elif media_type == "animated_gif":
+            vinfo = m.get("video_info") or {}
+            gif_variants = vinfo.get("variants") or []
+            gif_url = gif_variants[0].get("url") if gif_variants else None
+            if gif_url:
+                animated.append(MediaAnimated(
+                    thumbnailUrl=url or "",
+                    videoUrl=gif_url,
+                ))
+
+    return Media(photos=photos, videos=videos, animated=animated)
 
 
 def _to_user_ref(mention: dict) -> UserRef | None:
@@ -235,6 +319,20 @@ def to_tweet(obj: dict) -> Tweet:
 
     conv_id_str = str(obj.get("conversationId") or tweet_id_str)
 
+    # Prefer the `displayTextRange`-trimmed text when available: Twitter's
+    # native tweet.text includes a trailing media/card t.co shortlink that
+    # isn't shown in the UI; `displayTextRange` is [start, end] of the
+    # visible portion. Trimming makes content match what humans see.
+    raw_text = obj.get("text") or ""
+    dtr = obj.get("displayTextRange")
+    if isinstance(dtr, list) and len(dtr) == 2:
+        try:
+            start, end = int(dtr[0]), int(dtr[1])
+            if 0 <= start <= end <= len(raw_text):
+                raw_text = raw_text[start:end]
+        except (TypeError, ValueError):
+            pass
+
     return Tweet(
         id=_int(tweet_id_str),
         id_str=tweet_id_str,
@@ -242,7 +340,7 @@ def to_tweet(obj: dict) -> Tweet:
         date=_parse_date(obj.get("createdAt")),
         user=author,
         lang=obj.get("lang") or "",
-        rawContent=obj.get("text") or "",
+        rawContent=raw_text,
         replyCount=_int(obj.get("replyCount")),
         retweetCount=_int(obj.get("retweetCount")),
         likeCount=_int(obj.get("likeCount")),
