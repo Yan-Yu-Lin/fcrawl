@@ -16,6 +16,7 @@ from .xclid import XClIdGen
 
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
+ERROR_BODY_LIMIT = 500
 
 
 class HandledError(Exception): ...
@@ -115,6 +116,28 @@ def dump_rep(rep: Response):
         f.write(txt)
 
 
+def response_body_snippet(rep: Response, limit: int = ERROR_BODY_LIMIT) -> str:
+    text = rep.text or ""
+    text = " ".join(text.split())
+    return text[:limit]
+
+
+def classify_error(rep: Response, err_msg: str, limit_remaining: int = -1) -> str:
+    if limit_remaining == 0 or err_msg.startswith("(88) Rate limit exceeded"):
+        return "rate_limit"
+
+    if err_msg.startswith("(326) Authorization: Denied by access control"):
+        return "banned"
+
+    if err_msg.startswith("(32) Could not authenticate you"):
+        return "auth_expired"
+
+    if err_msg == "OK" and rep.status_code in (401, 403):
+        return "auth_expired"
+
+    return "unknown"
+
+
 class QueueClient:
     def __init__(self, pool: AccountsPool, queue: str, debug=False, proxy: str | None = None):
         self.pool = pool
@@ -130,7 +153,16 @@ class QueueClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self._close_ctx()
 
-    async def _close_ctx(self, reset_at=-1, inactive=False, msg: str | None = None):
+    async def _close_ctx(
+        self,
+        reset_at=-1,
+        inactive=False,
+        msg: str | None = None,
+        *,
+        cause: str | None = None,
+        error_status: int | None = None,
+        error_body: str | None = None,
+    ):
         if self.ctx is None:
             return
 
@@ -139,11 +171,26 @@ class QueueClient:
         await ctx.aclose()
 
         if inactive:
-            await self.pool.mark_inactive(username, msg)
+            await self.pool.mark_inactive(
+                username,
+                msg,
+                cause=cause,
+                error_status=error_status,
+                error_body=error_body,
+            )
             return
 
         if reset_at > 0:
-            await self.pool.lock_until(ctx.acc.username, self.queue, reset_at, ctx.req_count)
+            await self.pool.lock_until(
+                ctx.acc.username,
+                self.queue,
+                reset_at,
+                ctx.req_count,
+                cause=cause,
+                error_status=error_status,
+                error_body=error_body,
+                error_msg=msg,
+            )
             return
 
         await self.pool.unlock(ctx.acc.username, self.queue, ctx.req_count)
@@ -194,28 +241,62 @@ class QueueClient:
         # general api rate limit
         if limit_remaining == 0 and limit_reset > 0:
             logger.debug(f"Rate limited: {log_msg}")
-            await self._close_ctx(limit_reset)
+            await self._close_ctx(
+                limit_reset,
+                msg=err_msg,
+                cause="rate_limit",
+                error_status=rep.status_code,
+                error_body=response_body_snippet(rep),
+            )
             raise HandledError()
 
         # no way to check is account banned in direct way, but this check should work
         if err_msg.startswith("(88) Rate limit exceeded") and limit_remaining > 0:
             logger.warning(f"Ban detected: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=err_msg)
+            await self._close_ctx(
+                -1,
+                inactive=True,
+                msg=err_msg,
+                cause="banned",
+                error_status=rep.status_code,
+                error_body=response_body_snippet(rep),
+            )
             raise HandledError()
 
         if err_msg.startswith("(326) Authorization: Denied by access control"):
             logger.warning(f"Ban detected: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=err_msg)
+            await self._close_ctx(
+                -1,
+                inactive=True,
+                msg=err_msg,
+                cause="banned",
+                error_status=rep.status_code,
+                error_body=response_body_snippet(rep),
+            )
             raise HandledError()
 
         if err_msg.startswith("(32) Could not authenticate you"):
             logger.warning(f"Session expired or banned: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=err_msg)
+            await self._close_ctx(
+                -1,
+                inactive=True,
+                msg=err_msg,
+                cause="auth_expired",
+                error_status=rep.status_code,
+                error_body=response_body_snippet(rep),
+            )
             raise HandledError()
 
         if err_msg == "OK" and rep.status_code == 403:
             logger.warning(f"Session expired or banned: {log_msg}")
-            await self._close_ctx(-1, inactive=True, msg=None)
+            await self._close_ctx(
+                -1,
+                inactive=True,
+                msg=None,
+                cause="auth_expired",
+                error_status=rep.status_code,
+                error_body=response_body_snippet(rep),
+            )
             raise HandledError()
 
         # something from twitter side - abort all queries, see: https://github.com/vladkens/twscrape/pull/80
@@ -245,7 +326,13 @@ class QueueClient:
             rep.raise_for_status()
         except httpx.HTTPStatusError:
             logger.error(f"Unhandled API response code: {log_msg}")
-            await self._close_ctx(utc.ts() + 60 * 15)  # 15 minutes
+            await self._close_ctx(
+                utc.ts() + 60 * 15,
+                msg=err_msg,
+                cause=classify_error(rep, err_msg, limit_remaining),
+                error_status=rep.status_code,
+                error_body=response_body_snippet(rep),
+            )  # 15 minutes
             raise HandledError()
 
     async def get(self, url: str, params: ReqParams = None) -> Response | None:
@@ -291,4 +378,8 @@ class QueueClient:
                     ]
 
                     logger.warning(" ".join(msg))
-                    await self._close_ctx(utc.ts() + 60 * 15)  # 15 minutes
+                    await self._close_ctx(
+                        utc.ts() + 60 * 15,
+                        msg=f"{type(e).__name__}: {e}",
+                        cause="unknown",
+                    )  # 15 minutes

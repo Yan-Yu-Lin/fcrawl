@@ -4,7 +4,7 @@ import asyncio
 import sqlite3
 import uuid
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 from fake_useragent import UserAgent
 from httpx import HTTPStatusError
@@ -16,17 +16,46 @@ from .login import LoginConfig, login
 from .utils import get_env_bool, parse_cookies, utc
 
 
+NoAccountCause = Literal[
+    "no_accounts_added",
+    "all_rate_limited",
+    "all_banned",
+    "all_unknown_errors",
+]
+
+
 class NoAccountError(Exception):
-    pass
+    def __init__(
+        self,
+        queue: str,
+        cause: NoAccountCause = "all_unknown_errors",
+        *,
+        next_unlock_at: datetime | None = None,
+        message: str | None = None,
+    ):
+        self.queue = queue
+        self.cause = cause
+        self.next_unlock_at = next_unlock_at
+        super().__init__(message or self._build_message())
+
+    def _build_message(self) -> str:
+        msg = f"No account available for queue {self.queue}: {self.cause}"
+        if self.next_unlock_at:
+            msg += f" until {self.next_unlock_at.isoformat()}"
+        return msg
 
 
 class AccountInfo(TypedDict):
     username: str
     logged_in: bool
     active: bool
+    locks: dict[str, datetime]
     last_used: datetime | None
     total_req: int
     error_msg: str | None
+    last_error_cause: str | None
+    last_error_status: int | None
+    last_error_body: str | None
 
 
 def guess_delim(line: str):
@@ -262,15 +291,40 @@ class AccountsPool:
         qs = "UPDATE accounts SET active = :active WHERE username = :username"
         await execute(self._db_file, qs, {"username": username, "active": active})
 
-    async def lock_until(self, username: str, queue: str, unlock_at: int, req_count=0):
+    async def lock_until(
+        self,
+        username: str,
+        queue: str,
+        unlock_at: int,
+        req_count=0,
+        *,
+        cause: str | None = None,
+        error_status: int | None = None,
+        error_body: str | None = None,
+        error_msg: str | None = None,
+    ):
         qs = f"""
         UPDATE accounts SET
             locks = json_set(locks, '$.{queue}', datetime({unlock_at}, 'unixepoch')),
             stats = json_set(stats, '$.{queue}', COALESCE(json_extract(stats, '$.{queue}'), 0) + {req_count}),
-            last_used = datetime({utc.ts()}, 'unixepoch')
+            last_used = datetime({utc.ts()}, 'unixepoch'),
+            error_msg = COALESCE(:error_msg, error_msg),
+            last_error_cause = :cause,
+            last_error_status = :error_status,
+            last_error_body = :error_body
         WHERE username = :username
         """
-        await execute(self._db_file, qs, {"username": username})
+        await execute(
+            self._db_file,
+            qs,
+            {
+                "username": username,
+                "cause": cause,
+                "error_status": error_status,
+                "error_body": error_body,
+                "error_msg": error_msg,
+            },
+        )
 
     async def unlock(self, username: str, queue: str, req_count=0):
         qs = f"""
@@ -325,21 +379,72 @@ class AccountsPool:
 
         return await self._get_and_lock(queue, q)
 
+    async def account_availability(self, queue: str):
+        accounts = await self.get_all()
+        now = utc.now()
+
+        if not accounts:
+            return {
+                "cause": "no_accounts_added",
+                "next_unlock_at": None,
+                "accounts": accounts,
+            }
+
+        active = [x for x in accounts if x.active]
+        if not active:
+            return {
+                "cause": "all_banned",
+                "next_unlock_at": None,
+                "accounts": accounts,
+            }
+
+        unavailable = []
+        for account in active:
+            locked_until = account.locks.get(queue)
+            if locked_until and locked_until > now:
+                unavailable.append((account, locked_until))
+
+        if len(unavailable) == len(active):
+            next_unlock_at = min(x[1] for x in unavailable)
+            causes = {x[0].last_error_cause for x in unavailable}
+            if "unknown" in causes:
+                cause = "all_unknown_errors"
+            else:
+                cause = "all_rate_limited"
+
+            return {
+                "cause": cause,
+                "next_unlock_at": next_unlock_at,
+                "accounts": accounts,
+            }
+
+        return {
+            "cause": "all_unknown_errors",
+            "next_unlock_at": None,
+            "accounts": accounts,
+        }
+
     async def get_for_queue_or_wait(self, queue: str) -> Account | None:
         msg_shown = False
         while True:
             account = await self.get_for_queue(queue)
             if not account:
+                availability = await self.account_availability(queue)
                 if self._raise_when_no_account or get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT"):
-                    raise NoAccountError(f"No account available for queue {queue}")
+                    raise NoAccountError(
+                        queue,
+                        availability["cause"],
+                        next_unlock_at=availability["next_unlock_at"],
+                    )
 
                 if not msg_shown:
-                    nat = await self.next_available_at(queue)
+                    nat = availability["next_unlock_at"]
                     if not nat:
                         logger.warning("No active accounts. Stopping...")
                         return None
 
-                    msg = f'No account available for queue "{queue}". Next available at {nat}'
+                    at_local = datetime.now() + (nat - utc.now())
+                    msg = f'No account available for queue "{queue}". Next available at {at_local:%H:%M:%S}'
                     logger.info(msg)
                     msg_shown = True
 
@@ -370,12 +475,37 @@ class AccountsPool:
 
         return None
 
-    async def mark_inactive(self, username: str, error_msg: str | None):
+    async def mark_inactive(
+        self,
+        username: str,
+        error_msg: str | None,
+        *,
+        cause: str | None = None,
+        error_status: int | None = None,
+        error_body: str | None = None,
+    ):
         qs = """
-        UPDATE accounts SET active = false, error_msg = :error_msg
+        UPDATE accounts SET
+            active = false,
+            error_msg = :error_msg,
+            last_error_cause = :cause,
+            last_error_status = :error_status,
+            last_error_body = :error_body,
+            last_used = datetime(:last_used, 'unixepoch')
         WHERE username = :username
         """
-        await execute(self._db_file, qs, {"username": username, "error_msg": error_msg})
+        await execute(
+            self._db_file,
+            qs,
+            {
+                "username": username,
+                "error_msg": error_msg,
+                "cause": cause,
+                "error_status": error_status,
+                "error_body": error_body,
+                "last_used": utc.ts(),
+            },
+        )
 
     async def stats(self):
         def locks_count(queue: str):
@@ -409,9 +539,13 @@ class AccountsPool:
                 "username": x.username,
                 "logged_in": (x.headers or {}).get("authorization", "") != "",
                 "active": x.active,
+                "locks": x.locks,
                 "last_used": x.last_used,
                 "total_req": sum(x.stats.values()),
-                "error_msg": str(x.error_msg)[0:60],
+                "error_msg": str(x.error_msg)[0:60] if x.error_msg else None,
+                "last_error_cause": x.last_error_cause,
+                "last_error_status": x.last_error_status,
+                "last_error_body": x.last_error_body,
             }
             items.append(item)
 

@@ -53,6 +53,19 @@ def _fix_unquoted_keys(s: str) -> str:
     return re.sub(r'([{,])\s*([^"{,}\s][^:,}]*?)\s*:', r'\1"\2":', s)
 
 
+def get_scripts_debug_snippet(text: str, radius: int = 500) -> str:
+    marker = '[e]+"a.js"'
+    idx = text.find(marker)
+    if idx < 0:
+        idx = text.find("client-web")
+    if idx < 0:
+        idx = 0
+
+    start = max(0, idx - radius)
+    end = min(len(text), idx + len(marker) + radius)
+    return text[start:end].replace("\n", " ")
+
+
 def get_scripts_list(text: str):
     # Twitter changed their chunk mapping format:
     # Old: e=>e+"."+{HASH_MAP}[e]+"a.js"

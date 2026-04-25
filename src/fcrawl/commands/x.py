@@ -16,6 +16,7 @@ from ..utils.output import handle_output, save_to_file
 from ..utils.x_client import get_x_api, get_x_db_path, get_x_pool
 from ..vendors.twscrape import NoAccountError, Tweet, User
 from ..vendors.twscrape.models import parse_tweet
+from ._x_diagnose import render_diagnostics, run_diagnostics
 from . import _x_twitterapi as twitterapi_backend
 
 console = Console()
@@ -25,6 +26,40 @@ console = Console()
 # a twitterapi.io API key.
 PROVIDER_CHOICES = ['twscrape', 'twitterapi']
 PROVIDER_DEFAULT = 'twscrape'
+
+
+def _format_unlock(dt) -> str:
+    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "unknown"
+
+
+def _handle_no_account_error(e: NoAccountError) -> None:
+    if e.cause == "no_accounts_added":
+        console.print("[red]No X accounts configured.[/red]")
+        console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
+        console.print("Or:  [bold]fcrawl x accounts add-tokens --ct0 VALUE --auth VALUE[/bold]")
+        return
+
+    if e.cause == "all_rate_limited":
+        console.print("[yellow]All X accounts are rate limited for this queue.[/yellow]")
+        console.print(f"Queue: [bold]{e.queue}[/bold]")
+        console.print(f"Next unlock: [bold]{_format_unlock(e.next_unlock_at)}[/bold]")
+        console.print("Run [bold]fcrawl x accounts[/bold] to inspect account locks.")
+        return
+
+    if e.cause == "all_unknown_errors":
+        console.print("[red]All X accounts are locked after unknown HTTP errors.[/red]")
+        console.print("This often means X changed an upstream API or x-client-transaction-id format.")
+        console.print("Run [bold]fcrawl x diagnose[/bold] to see the actual HTTP status/body.")
+        return
+
+    if e.cause == "all_banned":
+        console.print("[red]No active X accounts are available.[/red]")
+        console.print("All configured accounts are inactive after auth or access-control errors.")
+        console.print("Run [bold]fcrawl x accounts[/bold] to inspect the stored error details.")
+        return
+
+    console.print(f"[red]{e}[/red]")
+    console.print("Run [bold]fcrawl x diagnose[/bold] for a structured backend check.")
 
 
 def extract_tweet_id(id_or_url: str) -> int:
@@ -254,6 +289,20 @@ def x():
     pass
 
 
+@x.command(name='diagnose')
+def x_diagnose():
+    """Run twscrape/X preflight checks and print a structured report."""
+    try:
+        report = asyncio.run(run_diagnostics())
+    except Exception as e:
+        console.print(f"[red]Error running diagnostics: {e}[/red]")
+        raise click.Abort()
+
+    render_diagnostics(report, console)
+    if not report["ok"]:
+        raise click.ClickException(report["summary"])
+
+
 @x.command(name='search')
 @click.argument('query')
 @click.option('--limit', '-l', type=int, default=20, help='Maximum number of results')
@@ -334,11 +383,9 @@ def x_search(query: str, limit: int, sort: str, provider: str, output: Optional[
         try:
             tweets = asyncio.run(_fetch())
             progress.stop()
-        except NoAccountError:
+        except NoAccountError as e:
             progress.stop()
-            console.print("[red]No X accounts configured.[/red]")
-            console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
-            console.print("\nFile format: username:password:email:email_password (one per line)")
+            _handle_no_account_error(e)
             raise click.Abort()
         except Exception as e:
             progress.stop()
@@ -622,10 +669,9 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
                 tweets = [tweet]
                 progress.stop()
 
-        except NoAccountError:
+        except NoAccountError as e:
             progress.stop()
-            console.print("[red]No X accounts configured.[/red]")
-            console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
+            _handle_no_account_error(e)
             raise click.Abort()
         except Exception as e:
             progress.stop()
@@ -734,10 +780,9 @@ def x_article(id_or_url: str, output: Optional[str], json_output: bool, raw: boo
         try:
             rep = asyncio.run(_fetch())
             progress.stop()
-        except NoAccountError:
+        except NoAccountError as e:
             progress.stop()
-            console.print("[red]No X accounts configured.[/red]")
-            console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
+            _handle_no_account_error(e)
             raise click.Abort()
         except Exception as e:
             progress.stop()
@@ -847,10 +892,9 @@ def x_user(handle: str, provider: str, output: Optional[str], json_output: bool)
         try:
             user = asyncio.run(_fetch())
             progress.stop()
-        except NoAccountError:
+        except NoAccountError as e:
             progress.stop()
-            console.print("[red]No X accounts configured.[/red]")
-            console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
+            _handle_no_account_error(e)
             raise click.Abort()
         except Exception as e:
             progress.stop()
@@ -948,10 +992,9 @@ def x_tweets(handle: str, limit: int, provider: str, output: Optional[str], json
         try:
             user, tweets = asyncio.run(_fetch())
             progress.stop()
-        except NoAccountError:
+        except NoAccountError as e:
             progress.stop()
-            console.print("[red]No X accounts configured.[/red]")
-            console.print("Run: [bold]fcrawl x accounts add <file>[/bold]")
+            _handle_no_account_error(e)
             raise click.Abort()
         except Exception as e:
             progress.stop()
@@ -1021,13 +1064,22 @@ def _list_accounts():
     table.add_column("Logged In")
     table.add_column("Requests", justify="right")
     table.add_column("Last Used")
+    table.add_column("Locks")
+    table.add_column("Cause")
+    table.add_column("HTTP", justify="right")
     table.add_column("Error", style="red")
 
     for acc in accounts:
         active = "[green]Yes[/green]" if acc["active"] else "[red]No[/red]"
         logged_in = "[green]Yes[/green]" if acc["logged_in"] else "[dim]No[/dim]"
         last_used = acc["last_used"].strftime("%Y-%m-%d %H:%M") if acc["last_used"] else "-"
-        error = acc["error_msg"] or "-"
+        locks = acc.get("locks") or {}
+        lock_text = ", ".join(
+            f"{queue}: {until.strftime('%m-%d %H:%M')}" for queue, until in locks.items()
+        ) if locks else "-"
+        error = acc["error_msg"] or acc.get("last_error_body") or "-"
+        cause = acc.get("last_error_cause") or "-"
+        status = str(acc.get("last_error_status") or "-")
 
         table.add_row(
             acc["username"],
@@ -1035,6 +1087,9 @@ def _list_accounts():
             logged_in,
             str(acc["total_req"]),
             last_used,
+            lock_text,
+            cause,
+            status,
             error[:40] + "..." if len(error) > 40 else error,
         )
 
