@@ -1,0 +1,56 @@
+{
+  "type": "tweet",
+  "id": "2047420495386087912",
+  "url": "https://x.com/aliwhosane/status/2047420495386087912",
+  "text": "@cgtwts I am about 90% sure that majority of these 8750 are not software engineers",
+  "source": "Twitter for iPhone",
+  "retweetCount": 1,
+  "replyCount": 1,
+  "likeCount": 116,
+  "quoteCount": 0,
+  "viewCount": 22000,
+  "createdAt": "Thu Apr 23 21:00:59 +0000 2026",
+  "lang": "en",
+  "bookmarkCount": 3,
+  "isReply": true,
+  "inReplyToId": "2047359035268345995",
+  "conversationId": "2047359035268345995",
+  "inReplyToUserId": "1277585390254186496",
+  "inReplyToUsername": "cgtwts",
+  "author": {
+    "type": "user",
+    "userName": "aliwhosane",
+    "url": "https://x.com/aliwhosane",
+    "id": "9876543210",
+    "name": "Ali Husen",
+    "isBlueVerified": false,
+    "verifiedType": "",
+    "profilePicture": "https://pbs.twimg.com/profile_images/ali_200x200.jpg",
+    "coverPicture": "",
+    "description": "",
+    "location": "",
+    "followers": 285,
+    "following": 120,
+    "canDm": true,
+    "createdAt": "Sun Mar 20 04:12:00 +0000 2022",
+    "favouritesCount": 900,
+    "mediaCount": 5,
+    "statusesCount": 210,
+    "possiblySensitive": false,
+    "pinnedTweetIds": []
+  },
+  "entities": {
+    "hashtags": [],
+    "urls": [],
+    "user_mentions": [
+      {
+        "id_str": "1277585390254186496",
+        "name": "CG",
+        "screen_name": "cgtwts"
+      }
+    ]
+  },
+  "quoted_tweet": null,
+  "retweeted_tweet": null,
+  "isLimitedReply": false
+}

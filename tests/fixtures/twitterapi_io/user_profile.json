@@ -1,0 +1,44 @@
+{
+  "type": "user",
+  "userName": "anthropicai",
+  "url": "https://x.com/anthropicai",
+  "id": "1234567890",
+  "name": "Anthropic",
+  "isBlueVerified": true,
+  "verifiedType": "business",
+  "profilePicture": "https://pbs.twimg.com/profile_images/anthropic_400x400.jpg",
+  "coverPicture": "https://pbs.twimg.com/banner_images/anthropic.jpg",
+  "description": "We build Claude. AI safety research company.",
+  "location": "San Francisco",
+  "followers": 500000,
+  "following": 150,
+  "canDm": false,
+  "createdAt": "Tue Mar 15 10:00:00 +0000 2022",
+  "favouritesCount": 250,
+  "hasCustomTimelines": true,
+  "isTranslator": false,
+  "mediaCount": 420,
+  "statusesCount": 1200,
+  "withheldInCountries": [],
+  "possiblySensitive": false,
+  "pinnedTweetIds": ["1868244766405870076"],
+  "isAutomated": false,
+  "profile_bio": {
+    "description": "We build Claude. AI safety research company.",
+    "entities": {
+      "description": {
+        "urls": []
+      },
+      "url": {
+        "urls": [
+          {
+            "display_url": "anthropic.com",
+            "expanded_url": "https://www.anthropic.com",
+            "indices": [0, 23],
+            "url": "https://t.co/example"
+          }
+        ]
+      }
+    }
+  }
+}

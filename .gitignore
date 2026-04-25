@@ -76,4 +76,6 @@ accounts.db
 !docs/*.md
 !docs/**/*.md
 !requirements.txt
+# Test fixtures must be tracked even though *.json is otherwise ignored
+!tests/fixtures/**/*.json
 .todos/
