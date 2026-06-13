@@ -11,7 +11,7 @@ from rich.table import Table
 
 from ..utils.x_client import get_x_api, get_x_pool
 from ..vendors.twscrape import NoAccountError
-from ..vendors.twscrape.xclid import get_scripts_debug_snippet, get_scripts_list
+from ..vendors.twscrape.xclid import XClIdGen, get_scripts_debug_snippet, get_scripts_list
 
 X_HOME_URL = "https://x.com/"
 STABLE_TWEET_ID = 20
@@ -33,6 +33,10 @@ async def check_xclid(
         scripts = list(get_scripts_list(html))
         if not scripts:
             raise RuntimeError("get_scripts_list() returned no scripts")
+        # Exercise the full path used by real authenticated requests. This
+        # catches X rollouts where x.com/ still exposes parseable scripts but
+        # profile pages such as x.com/tesla require newer xclid logic.
+        await XClIdGen.create()
         return {
             "ok": True,
             "scripts_count": len(scripts),
@@ -159,7 +163,7 @@ def render_diagnostics(report: dict[str, Any], console: Console) -> None:
     xclid = report["xclid"]
     if xclid["ok"]:
         console.print(
-            f"[green]1. xclid preflight:[/green] parsed {xclid['scripts_count']} JS chunks"
+            f"[green]1. xclid preflight:[/green] parsed {xclid['scripts_count']} JS chunks and generated keys"
         )
         console.print(f"   sample: [dim]{xclid['sample_script']}[/dim]")
     else:

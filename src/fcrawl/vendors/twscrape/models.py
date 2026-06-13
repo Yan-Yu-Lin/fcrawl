@@ -9,7 +9,7 @@ import string
 import sys
 import traceback
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Generator, Optional, Union
 
 import httpx
@@ -139,7 +139,9 @@ class User(JSONTrait):
             username=obj["screen_name"],
             displayname=obj["name"],
             rawDescription=obj["description"],
-            created=email.utils.parsedate_to_datetime(obj["created_at"]),
+            created=email.utils.parsedate_to_datetime(obj["created_at"])
+            if obj.get("created_at")
+            else datetime(1970, 1, 1, tzinfo=timezone.utc),
             followersCount=obj["followers_count"],
             friendsCount=obj["friends_count"],
             statusesCount=obj["statuses_count"],
@@ -712,9 +714,12 @@ def _parse_items(rep: httpx.Response, kind: str, limit: int = -1):
     # check for dict, because httpx.Response can be mocked in tests with different type
     res = rep if isinstance(rep, dict) else rep.json()
     obj = to_old_rep(res)
+    retweeted_ids: set[str] = obj.get("retweeted_ids", set())
 
     ids = set()
     for x in obj[key].values():
+        if kind == "tweet" and x.get("id_str") in retweeted_ids:
+            continue
         if limit != -1 and len(ids) >= limit:
             # todo: move somewhere in configuration like force_limit
             # https://github.com/vladkens/twscrape/issues/26#issuecomment-1656875132

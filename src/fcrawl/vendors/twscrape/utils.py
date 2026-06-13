@@ -126,19 +126,119 @@ def get_typed_object(obj: dict, res: defaultdict[str, list]):
     return res
 
 
+def _merge_legacy(base: dict, legacy) -> dict:
+    # Top-level fields win; missing keys are filled from legacy when present.
+    out = dict(base)
+    if isinstance(legacy, dict):
+        for key, value in legacy.items():
+            out.setdefault(key, value)
+    return out
+
+
+def _flatten_user_v2(obj: dict) -> dict:
+    flat = _merge_legacy(obj, obj.get("legacy"))
+    rest_id = obj.get("rest_id") or flat.get("rest_id") or flat.get("id_str")
+    flat["rest_id"] = rest_id
+    flat["id_str"] = str(rest_id) if rest_id is not None else flat.get("id_str", "")
+    flat["id"] = int(rest_id) if rest_id is not None and str(rest_id).isdigit() else 0
+    flat["legacy"] = None
+
+    core = obj.get("core") or {}
+    if isinstance(core, dict):
+        for key in ("screen_name", "name", "created_at"):
+            if key not in flat and key in core:
+                flat[key] = core[key]
+
+    # X's 2026 schema often leaves legacy null/partial and moves these fields.
+    if not flat.get("profile_image_url_https"):
+        avatar_url = (obj.get("avatar") or {}).get("image_url")
+        if avatar_url:
+            flat["profile_image_url_https"] = avatar_url
+
+    location = obj.get("location")
+    if isinstance(location, dict):
+        loc = location.get("location")
+        if loc is not None:
+            flat["location"] = loc
+    elif not flat.get("location") and location is not None:
+        flat["location"] = location
+
+    if "protected" not in flat:
+        protected = (obj.get("privacy") or {}).get("protected")
+        if protected is not None:
+            flat["protected"] = protected
+
+    if "verified" not in flat:
+        verified = (obj.get("verification") or {}).get("verified")
+        if verified is not None:
+            flat["verified"] = verified
+
+    if "verified_type" not in flat:
+        verified_type = (obj.get("verification") or {}).get("verified_type")
+        if verified_type is not None:
+            flat["verified_type"] = verified_type
+
+    if "is_blue_verified" not in flat and "is_blue_verified" in obj:
+        flat["is_blue_verified"] = obj["is_blue_verified"]
+
+    if not flat.get("description"):
+        bio = (obj.get("profile_bio") or {}).get("description")
+        if bio is not None:
+            flat["description"] = bio
+
+    flat.setdefault("screen_name", "")
+    flat.setdefault("name", "")
+    flat.setdefault("description", "")
+    flat.setdefault("location", "")
+    flat.setdefault("followers_count", 0)
+    flat.setdefault("friends_count", 0)
+    flat.setdefault("statuses_count", 0)
+    flat.setdefault("favourites_count", 0)
+    flat.setdefault("listed_count", 0)
+    flat.setdefault("media_count", 0)
+    flat.setdefault("profile_image_url_https", "")
+    flat.setdefault("entities", {})
+    flat.setdefault("pinned_tweet_ids_str", [])
+    return flat
+
+
+def _flatten_tweet_v2(obj: dict) -> dict:
+    flat = _merge_legacy(obj, obj.get("legacy"))
+    rest_id = obj.get("rest_id") or flat.get("rest_id") or flat.get("id_str")
+    flat["rest_id"] = rest_id
+    flat["id_str"] = str(rest_id) if rest_id is not None else flat.get("id_str", "")
+    flat["id"] = int(rest_id) if rest_id is not None and str(rest_id).isdigit() else 0
+    flat["legacy"] = None
+    if "source" not in flat and "source" in obj:
+        flat["source"] = obj["source"]
+    flat.setdefault("full_text", "")
+    flat.setdefault("lang", "")
+    flat.setdefault("reply_count", 0)
+    flat.setdefault("retweet_count", 0)
+    flat.setdefault("favorite_count", 0)
+    flat.setdefault("quote_count", 0)
+    flat.setdefault("bookmark_count", 0)
+    flat.setdefault("entities", {})
+    flat.setdefault("conversation_id_str", flat["id_str"])
+    return flat
+
+
 def to_old_obj(obj: dict):
-    return {
-        **obj,
-        **obj["legacy"],
-        "id_str": str(obj["rest_id"]),
-        "id": int(obj["rest_id"]),
-        "legacy": None,
-    }
+    # Since 2026-05 X serves Tweet/User with legacy=null. Tweet fields moved
+    # to the top level; User fields are split between top-level and sub-objects
+    # core/avatar/location/privacy/verification/profile_bio.
+    if not isinstance(obj, dict):
+        return obj
+    if obj.get("__typename") == "User":
+        return _flatten_user_v2(obj)
+    return _flatten_tweet_v2(obj)
 
 
-def to_old_rep(obj: dict) -> dict[str, dict]:
+def to_old_rep(obj: dict) -> dict[str, Any]:
     tmp = get_typed_object(obj, defaultdict(list))
 
+    # "legacy" in x still matches under the new schema: the key is present
+    # with value None, so membership tests keep working.
     tw1 = [x for x in tmp.get("Tweet", []) if "legacy" in x]
     tw1 = {str(x["rest_id"]): to_old_obj(x) for x in tw1}
 
@@ -146,13 +246,31 @@ def to_old_rep(obj: dict) -> dict[str, dict]:
     tw2 = [x["tweet"] for x in tmp.get("TweetWithVisibilityResults", []) if "legacy" in x["tweet"]]
     tw2 = {str(x["rest_id"]): to_old_obj(x) for x in tw2}
 
-    users = [x for x in tmp.get("User", []) if "legacy" in x and "id" in x]
-    users = {str(x["rest_id"]): to_old_obj(x) for x in users}
+    users = {}
+    for x in tmp.get("User", []):
+        try:
+            res = to_old_obj(x)
+        except Exception:
+            continue
+        if res.get("screen_name"):
+            users[str(res["id_str"])] = res
 
     trends = [x for x in tmp.get("TimelineTrend", [])]
     trends = {x["name"]: x for x in trends}
 
-    return {"tweets": {**tw1, **tw2}, "users": users, "trends": trends}
+    tweets = {**tw1, **tw2}
+    retweeted_ids = {
+        str(retweeted_id)
+        for tweet in tweets.values()
+        for path in (
+            "retweeted_status_id_str",
+            "retweeted_status_result.result.rest_id",
+            "retweeted_status_result.result.tweet.rest_id",
+        )
+        if (retweeted_id := get_or(tweet, path)) is not None
+    }
+
+    return {"tweets": tweets, "retweeted_ids": retweeted_ids, "users": users, "trends": trends}
 
 
 def print_table(rows: list[dict], hr_after=False):
