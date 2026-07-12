@@ -1,0 +1,14 @@
+use_default_settings: true
+
+general:
+  instance_name: "SearXNG"
+  
+server:
+  limiter: false
+  secret_key: "ultrasecretkey"
+  
+search:
+  formats:
+    - html
+    - json
+  default_doi_resolver: "sci-hub.se"

@@ -1,0 +1,41 @@
+[project]
+name = "fcrawl"
+version = "0.1.0"
+description = "A powerful CLI tool for Firecrawl - web scraping from your terminal"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiosqlite>=0.22.1",
+    "beautifulsoup4>=4.14.3",
+    "camoufox[geoip]>=0.4.11",
+    "click>=8.3.1",
+    "fake-useragent>=2.0.0",
+    "firecrawl-py @ file:///Users/linyanyu/20-29-Development/23-tools/23.02-external-tools/firecrawl/apps/python-sdk",
+    "httpx>=0.28.1",
+    "loguru>=0.7.3",
+    "orjson>=3.11.5",
+    "pyotp>=2.9.0",
+    "pyperclip>=1.11.0",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
+    "rich>=14.2.0",
+    "yt-dlp>=2025.12.8",
+    # ASR dependencies for local transcription
+    "funasr>=1.0.0",
+    "torch>=2.0.0",
+    "pydub>=0.25.1",
+    "opencc-python-reimplemented>=0.1.7",
+]
+
+[project.scripts]
+fcrawl = "fcrawl:cli"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fcrawl"]
