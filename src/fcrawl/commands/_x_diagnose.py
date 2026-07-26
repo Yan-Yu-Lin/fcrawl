@@ -17,26 +17,46 @@ X_HOME_URL = "https://x.com/"
 STABLE_TWEET_ID = 20
 
 
-async def fetch_x_home() -> str:
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20) as client:
+async def _pool_cookies() -> dict[str, str]:
+    """Cookies from any logged-in account, so the preflight sees the same
+    authenticated build that real requests use (anonymous fetches get the
+    logged-out x-web build, which has no XClientTxId indices)."""
+    try:
+        accounts = await get_x_pool().get_all()
+    except Exception:
+        return {}
+    for acc in accounts:
+        if getattr(acc, "cookies", None):
+            return acc.cookies
+    return {}
+
+
+async def fetch_x_home(cookies: dict[str, str] | None = None) -> str:
+    async with httpx.AsyncClient(
+        follow_redirects=True, timeout=20, cookies=cookies or None
+    ) as client:
         rep = await client.get(X_HOME_URL)
         rep.raise_for_status()
         return rep.text
 
 
 async def check_xclid(
-    fetch: Callable[[], Any] = fetch_x_home,
+    fetch: Callable[..., Any] = fetch_x_home,
 ) -> dict[str, Any]:
     html = ""
     try:
-        html = await fetch()
+        cookies = await _pool_cookies()
+        try:
+            html = await fetch(cookies)
+        except TypeError:
+            html = await fetch()  # test doubles may take no arguments
         scripts = list(get_scripts_list(html))
         if not scripts:
             raise RuntimeError("get_scripts_list() returned no scripts")
         # Exercise the full path used by real authenticated requests. This
         # catches X rollouts where x.com/ still exposes parseable scripts but
         # profile pages such as x.com/tesla require newer xclid logic.
-        await XClIdGen.create()
+        await XClIdGen.create(cookies=cookies)
         return {
             "ok": True,
             "scripts_count": len(scripts),

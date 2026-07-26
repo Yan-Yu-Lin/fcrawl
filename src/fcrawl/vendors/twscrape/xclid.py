@@ -15,9 +15,13 @@ import httpx
 from fake_useragent import UserAgent
 
 
-def _make_client() -> httpx.AsyncClient:
+def _make_client(
+    proxy: str | None = None, cookies: dict[str, str] | None = None
+) -> httpx.AsyncClient:
     headers = {"user-agent": UserAgent().chrome}
-    return httpx.AsyncClient(headers=headers, follow_redirects=True)
+    return httpx.AsyncClient(
+        headers=headers, follow_redirects=True, proxy=proxy, cookies=cookies or None
+    )
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
@@ -164,7 +168,11 @@ async def _find_indices_url(scripts: list[str], clt: httpx.AsyncClient | None = 
         for task in tasks:
             task.cancel()
 
-    raise Exception("Couldn't get XClientTxId indices script")
+    raise Exception(
+        f"Couldn't get XClientTxId indices script (scanned {len(scripts)} chunks). "
+        "If the chunk URLs are /x-web/ assets, the fetch was anonymous — the "
+        "logged-out build has no indices file; pass account cookies instead."
+    )
 
 
 class Cubic:  # cubic_curve.py
@@ -350,9 +358,18 @@ async def load_keys(
 
 class XClIdGen:
     @staticmethod
-    async def create(clt: httpx.AsyncClient | None = None) -> "XClIdGen":
+    async def create(
+        clt: httpx.AsyncClient | None = None,
+        proxy: str | None = None,
+        cookies: dict[str, str] | None = None,
+    ) -> "XClIdGen":
+        # X serves two different web builds. Authenticated sessions still get the
+        # legacy webpack build, which links `ondemand.s.*.js` and is the only one
+        # containing the animation indices this parser needs. Anonymous sessions
+        # get the new x-web/Rolldown build, whose chunks no longer carry them at
+        # all — so account cookies are required here, not merely nice to have.
         close_client = clt is None
-        clt = clt or _make_client()
+        clt = clt or _make_client(proxy=proxy, cookies=cookies)
         try:
             text = await get_tw_page_text("https://x.com/tesla", clt=clt)
             soup = bs4.BeautifulSoup(text, "html.parser")
