@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import httpx
 import pytest
 
+import fcrawl.commands._x_diagnose as x_diagnose
 from fcrawl.commands._x_diagnose import check_xclid
 from fcrawl.vendors.twscrape.accounts_pool import AccountsPool, NoAccountError
 from fcrawl.vendors.twscrape.queue_client import classify_error, response_body_snippet
@@ -122,11 +124,68 @@ def test_classify_error_labels_auth_and_unknown():
     assert classify_error(httpx.Response(400, request=req), "OK", -1) == "unknown"
 
 
-def test_xclid_diagnose_reports_parser_snippet():
-    async def broken_home():
+def _active_account():
+    return SimpleNamespace(
+        username="active",
+        active=True,
+        cookies={"auth_token": "auth", "ct0": "csrf"},
+        proxy=None,
+        user_agent="test-agent",
+        resolve_proxy=lambda: None,
+    )
+
+
+def test_pool_account_skips_inactive_and_incomplete_accounts(monkeypatch):
+    accounts = [
+        SimpleNamespace(
+            username="inactive",
+            active=False,
+            cookies={"auth_token": "old", "ct0": "old"},
+        ),
+        SimpleNamespace(
+            username="incomplete",
+            active=True,
+            cookies={"ct0": "csrf"},
+        ),
+        _active_account(),
+    ]
+
+    class FakePool:
+        async def get_all(self):
+            return accounts
+
+    monkeypatch.setattr(x_diagnose, "get_x_pool", FakePool)
+    assert run(x_diagnose._pool_account()).username == "active"
+
+
+def test_xclid_diagnose_reports_parser_snippet(monkeypatch):
+    async def selected_account():
+        return _active_account()
+
+    async def broken_home(cookies, proxy, user_agent):
         return 'window.__chunks__=e=>(({abc:"main"})[e]||e)+"."+({broken:})[e]+"a.js"'
 
+    monkeypatch.setattr(x_diagnose, "_pool_account", selected_account)
     result = run(check_xclid(fetch=broken_home))
     assert result["ok"] is False
     assert "snippet" in result
     assert "a.js" in result["snippet"]
+
+
+def test_xclid_diagnose_does_not_retry_internal_type_error(monkeypatch):
+    calls = 0
+
+    async def selected_account():
+        return _active_account()
+
+    async def broken_home(cookies, proxy, user_agent):
+        nonlocal calls
+        calls += 1
+        raise TypeError("deep fetch failure")
+
+    monkeypatch.setattr(x_diagnose, "_pool_account", selected_account)
+    result = run(check_xclid(fetch=broken_home))
+
+    assert calls == 1
+    assert result["ok"] is False
+    assert result["error"] == "deep fetch failure"

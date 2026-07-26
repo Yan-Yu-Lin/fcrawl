@@ -12,7 +12,12 @@ from httpx import AsyncClient, Response
 from .accounts_pool import Account, AccountsPool
 from .logger import logger
 from .utils import utc
-from .xclid import XClIdGen
+from .xclid import (
+    XClIdAccountError,
+    XClIdGen,
+    XClIdParseError,
+    XClIdTransportError,
+)
 
 ReqParams = dict[str, str | int] | None
 TMP_TS = utc.now().isoformat().split(".")[0].replace("T", "_").replace(":", "-")[0:16]
@@ -35,6 +40,7 @@ class XClIdGenStore:
         fresh=False,
         proxy: str | None = None,
         cookies: dict[str, str] | None = None,
+        user_agent: str | None = None,
     ) -> XClIdGen:
         if username in cls.items and not fresh:
             return cls.items[username]
@@ -42,9 +48,11 @@ class XClIdGenStore:
         tries = 0
         while tries < 3:
             try:
-                # Account cookies are required: the anonymous build no longer
-                # ships the animation indices. See XClIdGen.create.
-                clid_gen = await XClIdGen.create(proxy=proxy, cookies=cookies)
+                clid_gen = await XClIdGen.create(
+                    proxy=proxy,
+                    cookies=cookies,
+                    user_agent=user_agent,
+                )
                 cls.items[username] = clid_gen
                 return clid_gen
             except httpx.HTTPStatusError:
@@ -57,10 +65,11 @@ class XClIdGenStore:
 
 
 class Ctx:
-    def __init__(self, acc: Account, clt: AsyncClient):
+    def __init__(self, acc: Account, clt: AsyncClient, proxy: str | None = None):
         self.req_count = 0
         self.acc = acc
         self.clt = clt
+        self.proxy = proxy
 
     async def aclose(self):
         await self.clt.aclose()
@@ -75,8 +84,9 @@ class Ctx:
             gen = await XClIdGenStore.get(
                 self.acc.username,
                 fresh=tries > 0,
-                proxy=self.acc.proxy,
+                proxy=self.proxy,
                 cookies=self.acc.cookies,
+                user_agent=self.acc.user_agent,
             )
             hdr = {"x-client-transaction-id": gen.calc(method, path)}
             rep = await self.clt.request(method, url, params=params, headers=hdr)
@@ -216,9 +226,16 @@ class QueueClient:
         if acc is None:
             return None
 
-        clt = acc.make_client(proxy=self.proxy)
-        self.ctx = Ctx(acc, clt)
+        effective_proxy = acc.resolve_proxy(self.proxy)
+        clt = acc.make_client(proxy=effective_proxy)
+        self.ctx = Ctx(acc, clt, proxy=effective_proxy)
         return self.ctx
+
+    def _format_ctx_error(self, ctx: Ctx, error: Exception) -> str:
+        return (
+            f"{type(error).__name__}: {error}; username={ctx.acc.username}; "
+            f"queue={self.queue}; proxy={bool(ctx.proxy)}"
+        )
 
     async def _check_rep(self, rep: Response) -> None:
         """
@@ -373,6 +390,25 @@ class QueueClient:
             except HandledError:
                 # retry with new account
                 continue
+            except XClIdAccountError as e:
+                logger.warning(self._format_ctx_error(ctx, e))
+                await self._close_ctx(
+                    utc.ts() + 60 * 15,
+                    msg=str(e),
+                    cause="unknown",
+                )
+                continue
+            except XClIdParseError as e:
+                logger.error(
+                    f"{self._format_ctx_error(ctx, e)}; "
+                    "the X signing parser likely needs an update"
+                )
+                await self._close_ctx()
+                return None
+            except XClIdTransportError as e:
+                logger.warning(self._format_ctx_error(ctx, e))
+                await self._close_ctx()
+                return None
             except (httpx.ReadTimeout, httpx.ProxyError):
                 # http transport failed, just retry with same account
                 continue

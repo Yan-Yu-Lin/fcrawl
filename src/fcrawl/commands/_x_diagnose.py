@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 from rich.console import Console
@@ -11,29 +12,44 @@ from rich.table import Table
 
 from ..utils.x_client import get_x_api, get_x_pool
 from ..vendors.twscrape import NoAccountError
-from ..vendors.twscrape.xclid import XClIdGen, get_scripts_debug_snippet, get_scripts_list
+from ..vendors.twscrape.account import Account, has_required_cookies, make_x_http_client
+from ..vendors.twscrape.xclid import (
+    XClIdAccountError,
+    XClIdGen,
+    XClIdParseError,
+    XClIdTransportError,
+    get_build_identity,
+    get_scripts_debug_snippet,
+    get_scripts_list,
+)
 
 X_HOME_URL = "https://x.com/"
 STABLE_TWEET_ID = 20
 
 
-async def _pool_cookies() -> dict[str, str]:
-    """Cookies from any logged-in account, so the preflight sees the same
-    authenticated build that real requests use (anonymous fetches get the
-    logged-out x-web build, which has no XClientTxId indices)."""
-    try:
-        accounts = await get_x_pool().get_all()
-    except Exception:
-        return {}
-    for acc in accounts:
-        if getattr(acc, "cookies", None):
-            return acc.cookies
-    return {}
+async def _pool_account() -> Account | None:
+    """Select an active account with the session material required by X."""
+    accounts = await get_x_pool().get_all()
+    return next(
+        (
+            acc
+            for acc in accounts
+            if acc.active and has_required_cookies(acc.cookies)
+        ),
+        None,
+    )
 
 
-async def fetch_x_home(cookies: dict[str, str] | None = None) -> str:
-    async with httpx.AsyncClient(
-        follow_redirects=True, timeout=20, cookies=cookies or None
+async def fetch_x_home(
+    cookies: dict[str, str],
+    proxy: str | None,
+    user_agent: str,
+) -> str:
+    async with make_x_http_client(
+        proxy=proxy,
+        cookies=cookies,
+        headers={"user-agent": user_agent},
+        timeout=20,
     ) as client:
         rep = await client.get(X_HOME_URL)
         rep.raise_for_status()
@@ -41,30 +57,63 @@ async def fetch_x_home(cookies: dict[str, str] | None = None) -> str:
 
 
 async def check_xclid(
-    fetch: Callable[..., Any] = fetch_x_home,
+    fetch: Callable[
+        [dict[str, str], str | None, str],
+        Awaitable[str],
+    ] = fetch_x_home,
 ) -> dict[str, Any]:
     html = ""
     try:
-        cookies = await _pool_cookies()
-        try:
-            html = await fetch(cookies)
-        except TypeError:
-            html = await fetch()  # test doubles may take no arguments
+        account = await _pool_account()
+        if account is None:
+            raise XClIdAccountError(
+                "No active X account has both auth_token and ct0 cookies"
+            )
+        proxy = account.resolve_proxy()
+        html = await fetch(account.cookies, proxy, account.user_agent)
         scripts = list(get_scripts_list(html))
         if not scripts:
             raise RuntimeError("get_scripts_list() returned no scripts")
         # Exercise the full path used by real authenticated requests. This
         # catches X rollouts where x.com/ still exposes parseable scripts but
         # profile pages such as x.com/tesla require newer xclid logic.
-        await XClIdGen.create(cookies=cookies)
+        await XClIdGen.create(
+            proxy=proxy,
+            cookies=account.cookies,
+            user_agent=account.user_agent,
+        )
         return {
             "ok": True,
             "scripts_count": len(scripts),
             "sample_script": scripts[0],
+            "build": get_build_identity(scripts),
+            "proxy": bool(proxy),
+        }
+    except XClIdAccountError as e:
+        return {
+            "ok": False,
+            "kind": "account",
+            "error": str(e),
+            "snippet": get_scripts_debug_snippet(html) if html else "",
+        }
+    except XClIdParseError as e:
+        return {
+            "ok": False,
+            "kind": "parse",
+            "error": str(e),
+            "snippet": get_scripts_debug_snippet(html) if html else "",
+        }
+    except (XClIdTransportError, httpx.HTTPError) as e:
+        return {
+            "ok": False,
+            "kind": "transport",
+            "error": str(e),
+            "snippet": get_scripts_debug_snippet(html) if html else "",
         }
     except Exception as e:
         return {
             "ok": False,
+            "kind": "unexpected",
             "error": str(e),
             "snippet": get_scripts_debug_snippet(html) if html else "",
         }
@@ -185,12 +234,20 @@ def render_diagnostics(report: dict[str, Any], console: Console) -> None:
         console.print(
             f"[green]1. xclid preflight:[/green] parsed {xclid['scripts_count']} JS chunks and generated keys"
         )
+        console.print(
+            f"   build: [dim]{xclid['build']}[/dim] · proxy: {'yes' if xclid['proxy'] else 'no'}"
+        )
         console.print(f"   sample: [dim]{xclid['sample_script']}[/dim]")
     else:
         console.print("[red]1. xclid preflight: failed[/red]")
-        console.print(
-            "   X likely changed their JS format — xclid.py needs updating"
-        )
+        kind = xclid.get("kind")
+        explanations = {
+            "account": "The selected account did not provide a usable authenticated web session",
+            "parse": "X returned a bundle format the signing parser could not read",
+            "transport": "One or more X page or asset requests failed",
+            "unexpected": "The preflight failed unexpectedly",
+        }
+        console.print(f"   {explanations.get(kind, 'The signing preflight failed')}")
         console.print(f"   error: {xclid.get('error') or '-'}")
         if xclid.get("snippet"):
             console.print("   snippet:")

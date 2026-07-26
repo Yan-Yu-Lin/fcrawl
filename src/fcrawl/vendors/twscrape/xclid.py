@@ -8,46 +8,75 @@ import math
 import random
 import re
 import time
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import bs4
 import httpx
 from fake_useragent import UserAgent
 
+from .account import make_x_http_client
+from .logger import logger
+
+
+class XClIdError(Exception): ...
+
+
+class XClIdAccountError(XClIdError): ...
+
+
+class XClIdParseError(XClIdError): ...
+
+
+class XClIdTransportError(XClIdError): ...
+
 
 def _make_client(
-    proxy: str | None = None, cookies: dict[str, str] | None = None
+    proxy: str | None = None,
+    cookies: dict[str, str] | None = None,
+    user_agent: str | None = None,
 ) -> httpx.AsyncClient:
-    headers = {"user-agent": UserAgent().chrome}
-    return httpx.AsyncClient(
-        headers=headers, follow_redirects=True, proxy=proxy, cookies=cookies or None
+    return make_x_http_client(
+        proxy=proxy,
+        cookies=cookies,
+        headers={"user-agent": user_agent or UserAgent().chrome},
     )
 
 
 async def get_tw_page_text(url: str, clt: httpx.AsyncClient | None = None):
+    close_client = clt is None
     clt = clt or _make_client()
-    rep = await clt.get(url)
+    try:
+        rep = await clt.get(url)
 
-    rep.raise_for_status()
-    if ">document.location =" not in rep.text:
+        rep.raise_for_status()
+        if ">document.location =" not in rep.text:
+            return rep.text
+
+        try:
+            url = rep.text.split('document.location = "')[1].split('"')[0]
+        except IndexError as e:
+            raise XClIdParseError("Invalid X migration redirect") from e
+        rep = await clt.get(url)
+        rep.raise_for_status()
+        if 'action="https://x.com/x/migrate" method="post"' not in rep.text:
+            return rep.text
+
+        data = {}
+        try:
+            for x in rep.text.split("<input")[1:]:
+                name = x.split('name="')[1].split('"')[0]
+                value = x.split('value="')[1].split('"')[0]
+                data[name] = value
+        except IndexError as e:
+            raise XClIdParseError("Invalid X migration form") from e
+
+        rep = await clt.post("https://x.com/x/migrate", json=data)
+        rep.raise_for_status()
+
         return rep.text
-
-    url = rep.text.split('document.location = "')[1].split('"')[0]
-    rep = await clt.get(url)
-    rep.raise_for_status()
-    if 'action="https://x.com/x/migrate" method="post"' not in rep.text:
-        return rep.text
-
-    data = {}
-    for x in rep.text.split("<input")[1:]:
-        name = x.split('name="')[1].split('"')[0]
-        value = x.split('value="')[1].split('"')[0]
-        data[name] = value
-
-    rep = await clt.post("https://x.com/x/migrate", json=data)
-    rep.raise_for_status()
-
-    return rep.text
+    finally:
+        if close_client:
+            await clt.aclose()
 
 
 def script_url(k: str, v: str):
@@ -75,12 +104,22 @@ def get_scripts_debug_snippet(text: str, radius: int = 500) -> str:
 # Current X web build (Vite): script bundles are linked directly in the page
 # HTML under https://abs.twimg.com/x-web/.../*.js (modulepreload links + entry).
 ASSET_URL_RE = re.compile(r"https://[\w.-]+/x-web/[\w./-]+\.js")
+LOGGED_OUT_ENTRY_RE = re.compile(
+    r"(?:^|/)entry-client-logged-out(?:[-.][^/?#]+)?\.js(?:[?#].*)?$"
+)
+
+
+def get_build_identity(scripts: list[str]) -> str:
+    filenames = [urlparse(url).path.rsplit("/", 1)[-1] for url in scripts]
+    return next((name for name in filenames if name.startswith("entry-")), filenames[0])
 
 
 def get_scripts_list(text: str) -> list[str]:
     # New x-web/Vite build: script URLs are linked directly in the page HTML.
     urls = list(dict.fromkeys(ASSET_URL_RE.findall(text)))
     if urls:
+        if any(LOGGED_OUT_ENTRY_RE.search(url) for url in urls):
+            raise XClIdAccountError("X returned its logged-out web entry")
         return urls
 
     # Legacy webpack builds changed their chunk mapping format several times:
@@ -89,7 +128,7 @@ def get_scripts_list(text: str) -> list[str]:
     # Newer: u.u=e=>""+(({NAME_MAP})[e]||e)+"."+({HASH_MAP})[e]+"a.js"
     # These share [e]+"a.js" as the suffix, so anchor on that.
     if '[e]+"a.js"' not in text:
-        raise Exception("Could not find chunk mapping in page")
+        raise XClIdParseError("Could not find X web chunk mapping")
 
     before_suffix = text.split('[e]+"a.js"', 1)[0]
 
@@ -98,7 +137,7 @@ def get_scripts_list(text: str) -> list[str]:
     hash_open = before_suffix.rfind("{")
     hash_close = before_suffix.rfind("}")
     if hash_open < 0 or hash_close < hash_open:
-        raise Exception("Could not find hash map boundary")
+        raise XClIdParseError("Could not find X web chunk hash map")
 
     hash_str = before_suffix[hash_open:hash_close + 1]
     hash_str = _fix_unquoted_keys(hash_str)
@@ -121,7 +160,7 @@ def get_scripts_list(text: str) -> list[str]:
     try:
         hash_map = json.loads(hash_str)
     except json.JSONDecodeError as e:
-        raise Exception("Failed to parse scripts") from e
+        raise XClIdParseError("Failed to parse X web chunk map") from e
 
     return [script_url(name_map.get(k, k), f"{v}a") for k, v in hash_map.items()]
 
@@ -144,35 +183,45 @@ INDICES_REGEX = re.compile(r"(\(\w{1}\[(\d{1,2})\],\s*16\))+", flags=(re.VERBOSE
 INDICES_FILE_RE = re.compile(r"(?:\.{0,2}/)?[\w./-]*?\b(?:ondemand\.s|sign\.o)[\w.-]*\.js")
 
 
-async def _find_indices_url(scripts: list[str], clt: httpx.AsyncClient | None = None) -> str:
+async def _find_indices_url(scripts: list[str], clt: httpx.AsyncClient) -> str:
     # The x-web/Vite build does not link sign.o-*.js in the page directly.
     # It is dynamically imported from one of the bundle chunks, so scan chunks
     # concurrently and resolve the first reference we find.
     sem = asyncio.Semaphore(16)
 
-    async def fetch(url: str) -> tuple[str, str]:
+    async def fetch(url: str) -> tuple[str, str | None, Exception | None]:
         async with sem:
             try:
-                return url, await get_tw_page_text(url, clt=clt)
-            except Exception:
-                return url, ""
+                return url, await get_tw_page_text(url, clt=clt), None
+            except Exception as e:
+                logger.trace(f"XClId asset failed: {type(e).__name__}: {e} - {url}")
+                return url, None, e
 
     tasks = [asyncio.create_task(fetch(url)) for url in scripts]
+    loaded, failed = 0, 0
     try:
         for fut in asyncio.as_completed(tasks):
-            url, body = await fut
+            url, body, error = await fut
+            if error is not None or body is None:
+                failed += 1
+                continue
+
+            loaded += 1
             match = INDICES_FILE_RE.search(body)
             if match:
                 return urljoin(url, match.group(0))
     finally:
         for task in tasks:
             task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
-    raise Exception(
-        f"Couldn't get XClientTxId indices script (scanned {len(scripts)} chunks). "
-        "If the chunk URLs are /x-web/ assets, the fetch was anonymous — the "
-        "logged-out build has no indices file; pass account cookies instead."
+    detail = (
+        f"assets: {loaded} loaded, {failed} failed; "
+        f"build: {get_build_identity(scripts)}"
     )
+    if failed:
+        raise XClIdTransportError(f"Incomplete X signing-script scan ({detail})")
+    raise XClIdParseError(f"X signing script not found ({detail})")
 
 
 class Cubic:  # cubic_curve.py
@@ -300,15 +349,20 @@ def parse_vk_bytes(soup: bs4.BeautifulSoup) -> list[int]:
     el = soup.find("meta", {"name": "twitter-site-verification", "content": True})
     el = str(el.get("content")) if el and isinstance(el, bs4.Tag) else None
     if not el:
-        raise Exception("Couldn't get XClientTxId key bytes")
+        raise XClIdParseError("X verification key not found")
 
-    return list(base64.b64decode(bytes(el, "utf-8")))
+    try:
+        return list(base64.b64decode(bytes(el, "utf-8"), validate=True))
+    except ValueError as e:
+        raise XClIdParseError("Invalid X verification key") from e
 
 
 async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> list[int]:
     scripts = list(get_scripts_list(text))
     if not scripts:
-        raise Exception("Couldn't get XClientTxId scripts")
+        raise XClIdParseError("X web scripts not found")
+    if clt is None:
+        raise XClIdParseError("X asset client is required")
 
     # Legacy builds link the indices file directly; current x-web builds hide it
     # behind a dynamic import inside a bundle chunk.
@@ -319,7 +373,7 @@ async def parse_anim_idx(text: str, clt: httpx.AsyncClient | None = None) -> lis
 
     items = [int(x.group(2)) for x in INDICES_REGEX.finditer(text)]
     if not items:
-        raise Exception("Couldn't get XClientTxId indices")
+        raise XClIdParseError("X signing indices not found")
 
     return items
 
@@ -329,12 +383,14 @@ def parse_anim_arr(soup: bs4.BeautifulSoup, vk_bytes: list[int]) -> list[list[fl
     els = list(soup.select("svg[id^='loading-x-anim'] g:first-child path:nth-child(2)"))
     els = [str(x.get("d") or "").strip() for x in els]
     if not els:
-        raise Exception("Couldn't get XClientTxId animation array")
+        raise XClIdParseError("X animation data not found")
 
-    idx = vk_bytes[5] % len(els)
-    dat = els[idx][9:].split("C")
-    arr = [list(map(float, re.sub(r"[^\d]+", " ", x).split())) for x in dat]
-    return arr
+    try:
+        idx = vk_bytes[5] % len(els)
+        dat = els[idx][9:].split("C")
+        return [list(map(float, re.sub(r"[^\d]+", " ", x).split())) for x in dat]
+    except (IndexError, ValueError) as e:
+        raise XClIdParseError("Invalid X animation data") from e
 
 
 async def load_keys(
@@ -344,41 +400,50 @@ async def load_keys(
     vk_bytes = parse_vk_bytes(soup)
     anim_arr = parse_anim_arr(soup, vk_bytes)
 
-    frame_time = 1
-    for x in anim_idx[1:]:
-        frame_time *= vk_bytes[x] % 16
+    try:
+        frame_time = 1
+        for x in anim_idx[1:]:
+            frame_time *= vk_bytes[x] % 16
 
-    frame_idx = vk_bytes[anim_idx[0]] % 16
-    frame_row = anim_arr[frame_idx]
-    frame_dur = float(frame_time) / 4096
+        frame_idx = vk_bytes[anim_idx[0]] % 16
+        frame_row = anim_arr[frame_idx]
+        frame_dur = float(frame_time) / 4096
+    except (IndexError, ValueError) as e:
+        raise XClIdParseError("Invalid X signing data") from e
 
-    anim_key = cacl_anim_key(frame_row, frame_dur)
+    try:
+        anim_key = cacl_anim_key(frame_row, frame_dur)
+    except (AssertionError, IndexError, ValueError, ZeroDivisionError) as e:
+        raise XClIdParseError("Invalid X animation key data") from e
     return vk_bytes, anim_key
 
 
 class XClIdGen:
     @staticmethod
     async def create(
-        clt: httpx.AsyncClient | None = None,
         proxy: str | None = None,
         cookies: dict[str, str] | None = None,
+        user_agent: str | None = None,
     ) -> "XClIdGen":
-        # X serves two different web builds. Authenticated sessions still get the
-        # legacy webpack build, which links `ondemand.s.*.js` and is the only one
-        # containing the animation indices this parser needs. Anonymous sessions
-        # get the new x-web/Rolldown build, whose chunks no longer carry them at
-        # all — so account cookies are required here, not merely nice to have.
-        close_client = clt is None
-        clt = clt or _make_client(proxy=proxy, cookies=cookies)
-        try:
-            text = await get_tw_page_text("https://x.com/tesla", clt=clt)
+        # Use the account's session context because X can assign different web
+        # bundle graphs by session/build bucket. Public JS assets never need the
+        # account credentials and are fetched through a separate cookieless client.
+        resolved_user_agent = user_agent or UserAgent().chrome
+        async with (
+            _make_client(
+                proxy=proxy,
+                cookies=cookies,
+                user_agent=resolved_user_agent,
+            ) as page_client,
+            _make_client(
+                proxy=proxy,
+                user_agent=resolved_user_agent,
+            ) as asset_client,
+        ):
+            text = await get_tw_page_text("https://x.com/tesla", clt=page_client)
             soup = bs4.BeautifulSoup(text, "html.parser")
-
-            vk_bytes, anim_key = await load_keys(soup, clt=clt)
+            vk_bytes, anim_key = await load_keys(soup, clt=asset_client)
             return XClIdGen(vk_bytes, anim_key)
-        finally:
-            if close_client:
-                await clt.aclose()
 
     def __init__(self, vk_bytes: list[int], anim_key: str):
         self.vk_bytes = vk_bytes
