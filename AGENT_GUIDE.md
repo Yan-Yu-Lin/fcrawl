@@ -39,6 +39,19 @@ fcrawl gsearch "query"                            # Direct Google browser search
 
 `search` requires `SERPER_API_KEY` (or `serper_api_key` in config).
 
+### Code Search (Developer Index)
+
+For coding questions — error messages, known bugs, library behavior, API docs — use `dev`. It searches GitHub issues, merged PRs, READMEs, and curated docs sites, and returns the matching passage from each one.
+
+```bash
+fcrawl dev "error message or question"            # All kinds
+fcrawl dev "error message" -t issue -t pull_request  # Only issues/PRs: where was this bug fixed?
+fcrawl dev "how to configure X" -t doc            # Only docs
+fcrawl dev "retry on 429" -r owner/repo -p 3      # One repo, 3 passages per result
+```
+
+Use `dev` first when debugging a library error; fall back to `search` if it finds nothing. Scrape the result URL if the passage isn't enough.
+
 ### Web Scraping
 
 ```bash

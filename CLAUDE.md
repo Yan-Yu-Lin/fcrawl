@@ -30,6 +30,7 @@ fcrawl/
 | `map <url>` | Discover all URLs on a domain |
 | `extract <urls>` | Extract structured data using AI (requires --prompt/--fields/--schema) |
 | `search <query>` | Fast Google web search via Serper API |
+| `dev <query>` | Code search: GitHub issues, PRs, READMEs, docs (Firecrawl Developer Index) |
 | `csearch <query>` | Multi-engine browser search (Google/Bing/Brave via Camoufox) |
 | `gsearch <query>` | Direct Google browser search via Camoufox |
 | `config` | View current configuration |

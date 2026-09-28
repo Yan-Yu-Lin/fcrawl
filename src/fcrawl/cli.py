@@ -13,6 +13,7 @@ from .commands.crawl import crawl
 from .commands.map import map_site
 from .commands.extract import extract
 from .commands.search import search
+from .commands.dev import dev
 from .commands.gsearch import gsearch
 from .commands.csearch import csearch
 from .commands.yt_transcript import yt_transcript
@@ -46,6 +47,7 @@ def cli(ctx):
         fcrawl crawl https://blog.com --limit 10    # Crawl site to folder
         fcrawl map https://docs.site.com            # Discover URLs
         fcrawl search "query"                       # Fast web search via Serper
+        fcrawl dev "query"                          # Code search: issues, PRs, READMEs, docs
         fcrawl csearch "query"                      # Multi-engine browser search
 
     \b
@@ -65,6 +67,7 @@ cli.add_command(crawl)
 cli.add_command(map_site, name="map")
 cli.add_command(extract)
 cli.add_command(search)
+cli.add_command(dev)
 cli.add_command(gsearch)
 cli.add_command(csearch)
 cli.add_command(yt_transcript)

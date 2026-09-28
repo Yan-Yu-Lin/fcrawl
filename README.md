@@ -154,6 +154,38 @@ Supports automatic pagination — if `--limit` exceeds 100, it fetches multiple 
 
 ---
 
+### `dev` — Code search via Firecrawl Developer Index
+
+Searches Firecrawl Cloud's [Developer Index](https://docs.firecrawl.dev/features/developer): GitHub issues, merged PRs, READMEs, and curated docs sites. Each result includes the matching passage, not just a link. Best for error messages, known bugs, and library/API behavior.
+
+Always calls `api.firecrawl.dev`, even when `api_url` is self-hosted. Works without a key (small daily per-IP limit); uses `FIRECRAWL_API_KEY` / `api_key` if it's a Cloud key (`fc-...`). Costs 2 credits per 10 results.
+
+```bash
+fcrawl dev <query> [options]
+```
+
+| Option | Short | Description |
+|--------|-------|-------------|
+| `--limit` | `-l` | Results, 1-100 (default: 10) |
+| `--type` | `-t` | `doc`, `issue`, `pull_request`, `readme` (repeatable) |
+| `--repo` | `-r` | Scope issues/PRs/READMEs to `owner/repo` (repeatable) |
+| `--source` | | Scope docs to a doc source id (repeatable) |
+| `--passages` | `-p` | Matched passages per result, 1-5 (default: 1) |
+| `--skills` | | Only search agent-skill files |
+| `--language` / `--topic` / `--license` / `--min-stars` / `--max-stars` | | Repo filters (these drop doc results) |
+| `--json` / `-o` / `--urls-only` / `--no-cache` / `--cache-only` | | Same as `search` |
+
+```bash
+fcrawl dev "uv tool install editable"
+fcrawl dev "Could not find chunk mapping in page" -t issue -t pull_request
+fcrawl dev "retry on 429" -r firecrawl/firecrawl -p 3
+fcrawl dev "nuxt runtime config" -t doc
+```
+
+Warns when a `--repo` / `--source` isn't in the index, so you can tell "not indexed" from "nothing matched".
+
+---
+
 ### `csearch` — Multi-engine browser search
 
 Searches Google, Bing, and Brave in parallel using an anti-detection browser ([Camoufox](https://github.com/nickspaargaren/camoufox)). Results are aggregated and deduplicated — URLs found by multiple engines rank higher.
