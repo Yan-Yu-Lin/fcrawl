@@ -209,7 +209,7 @@ def crawl(
                 result = firecrawl_job(
                     lambda client: client.start_crawl(url, **crawl_options),
                     lambda client, job_id: wait_for_crawl_completion(
-                        client.v2.http_client, job_id, poll_interval, timeout
+                        client.v2.http_client, job_id, poll_interval, timeout, request_timeout=timeout
                     ),
                 )
 
