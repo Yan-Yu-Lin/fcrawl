@@ -30,7 +30,6 @@ BLOCKED_PHRASES = (
     "verify you are human by completing the action below",
     "enable javascript and cookies to continue",
     "checking your browser before accessing",
-    "cf-chl",
     "the request could not be satisfied",
 )
 SHORT_CONTENT = 800
@@ -109,10 +108,11 @@ def validate_result(result) -> Tuple[bool, str]:
     if isinstance(status, int) and status >= 400:
         return False, f"upstream {status}"
 
-    # "Just a moment... | Cloudflare" -> "just a moment..."
+    # Whole-title match; the only suffix a real challenge page carries is
+    # " | Cloudflare", so "Access Denied - Troubleshooting ..." stays an article.
     title = str(get("title") or "").strip().lower()
-    base_title = title.split(" | ")[0].split(" - ")[0].strip()
-    if base_title in BLOCKED_TITLES:
+    base_title = title[: -len(" | cloudflare")] if title.endswith(" | cloudflare") else title
+    if base_title.strip() in BLOCKED_TITLES:
         return False, f"blocked page: {title[:60]}"
 
     markdown = (get_field("markdown") or "").strip()

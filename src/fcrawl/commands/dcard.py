@@ -39,7 +39,7 @@ def fetch_json(url: str, timeout: int, no_cache: bool) -> Any:
     key = cache_key(url)
     if not no_cache:
         cached = read_cache("dcard", key)
-        if cached is not None:
+        if cached is not None and not is_error_envelope(cached):
             return cached
     result = firecrawl_call(
         lambda client: client.scrape(url, formats=["markdown"], timeout=timeout * 1000)
@@ -54,10 +54,14 @@ def fetch_json(url: str, timeout: int, no_cache: bool) -> Any:
         markdown = markdown.split("\n", 1)[1] if "\n" in markdown else ""
         markdown = markdown.rsplit("```", 1)[0]
     data = json.loads(markdown)
-    if isinstance(data, dict) and "error" in data and "id" not in data:
+    if is_error_envelope(data):
         raise RuntimeError(f"Dcard API error: {data.get('message') or data['error']}")
     write_cache("dcard", key, data)
     return data
+
+
+def is_error_envelope(data: Any) -> bool:
+    return isinstance(data, dict) and "error" in data and "id" not in data
 
 
 def fetch_comments(post_id: str, limit: int, timeout: int, no_cache: bool) -> list:

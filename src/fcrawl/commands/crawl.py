@@ -154,8 +154,6 @@ def crawl(
         'scrape_options': {
             'formats': ['markdown']  # Always markdown for MD file output
         },
-        'poll_interval': poll_interval,
-        'timeout': timeout
     }
 
     if depth:
@@ -210,7 +208,9 @@ def crawl(
 
                 result = firecrawl_job(
                     lambda client: client.start_crawl(url, **crawl_options),
-                    lambda client, job_id: wait_for_crawl_completion(client.http_client, job_id),
+                    lambda client, job_id: wait_for_crawl_completion(
+                        client.v2.http_client, job_id, poll_interval, timeout
+                    ),
                 )
 
                 progress.stop()

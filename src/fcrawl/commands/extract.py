@@ -91,7 +91,7 @@ def extract(
 
             result = firecrawl_job(
                 lambda client: client.start_extract(**extract_options),
-                lambda client, job_id: wait_extract(client.http_client, job_id),
+                lambda client, job_id: wait_extract(client.v2.http_client, job_id),
             )
 
             progress.update(task, completed=True)

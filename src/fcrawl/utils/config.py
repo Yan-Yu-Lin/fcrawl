@@ -150,9 +150,14 @@ def get_key_pool(max_wait: Optional[int] = None) -> "KeyPool":
     config = load_config()
     keys = get_api_keys(config)
     if is_self_hosted(config["api_url"]):
-        # One dummy key with no per-minute budget: the local server has no
-        # rate limit and the state file would otherwise throttle it.
-        return KeyPool(keys or ["local-dummy-key"], rate_limit=10**9, max_wait=0)
+        # Local server: no rate limit, no shared cooldown/disabled state from
+        # cloud keys. Its own state dir keeps it independent of the cloud pool.
+        return KeyPool(
+            keys[:1] or ["local-dummy-key"],
+            rate_limit=10**9,
+            max_wait=0,
+            state_dir=Path("/tmp/fcrawl-keys-local"),
+        )
     return KeyPool(
         keys,
         rate_limit=int(config.get("rate_limit_per_minute") or 10),
