@@ -9,7 +9,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from rich.console import Console
 from typing import Optional, List
 
-from ..utils.config import get_firecrawl_client
+from ..utils.config import firecrawl_call
 from ..utils.output import console, strip_links
 from ..utils.cache import cache_key, read_cache, write_cache, crawl_result_to_dict, CachedCrawlResult
 
@@ -203,12 +203,10 @@ def crawl(
             task = progress.add_task(f"Crawling {url}...", total=limit)
 
             try:
-                client = get_firecrawl_client()
-
                 console.print(f"[cyan]Starting crawl of {url} (limit: {limit} pages)[/cyan]")
 
                 # Start the crawl - this blocks until complete with poll_interval
-                result = client.crawl(url, **crawl_options)
+                result = firecrawl_call(lambda client: client.crawl(url, **crawl_options))
 
                 progress.stop()
 

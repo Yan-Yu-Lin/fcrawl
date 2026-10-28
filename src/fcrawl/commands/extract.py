@@ -6,7 +6,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from typing import Optional, List
 
-from ..utils.config import get_firecrawl_client
+from ..utils.config import firecrawl_call
 from ..utils.output import handle_output, console, resolve_pretty
 
 
@@ -81,15 +81,13 @@ def extract(
         task = progress.add_task(f"Extracting from {len(urls)} URL(s)...", total=None)
 
         try:
-            client = get_firecrawl_client()
-
             # Note: The extract method might be async/job-based
             # This is a simplified version - might need polling
             console.print(f"[cyan]Starting extraction from {len(urls)} URLs...[/cyan]")
 
             # For v2 API, extract returns immediately with the data
             # (unlike the v1 API which required polling)
-            result = client.extract(**extract_options)
+            result = firecrawl_call(lambda client: client.extract(**extract_options))
 
             progress.update(task, completed=True)
 

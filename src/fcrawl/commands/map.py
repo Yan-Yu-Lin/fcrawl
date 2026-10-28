@@ -5,7 +5,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from typing import Optional
 
-from ..utils.config import get_firecrawl_client
+from ..utils.config import firecrawl_call
 from ..utils.output import handle_output, console, resolve_pretty
 
 
@@ -58,8 +58,7 @@ def map_site(
         task = progress.add_task(f"Mapping {url}...", total=None)
 
         try:
-            client = get_firecrawl_client()
-            result = client.map(url, **map_options)
+            result = firecrawl_call(lambda client: client.map(url, **map_options))
 
             progress.stop()
 
