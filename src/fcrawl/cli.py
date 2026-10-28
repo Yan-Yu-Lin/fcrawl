@@ -23,6 +23,7 @@ from .commands.transcribe import transcribe
 from .commands.x import x
 from .commands.reddit import reddit
 from .commands.cache_cmd import cache
+from .commands.dcard import dcard
 from .utils.config import load_config, mask_key
 
 console = Console()
@@ -78,6 +79,7 @@ cli.add_command(transcribe)
 cli.add_command(x)
 cli.add_command(reddit)
 cli.add_command(cache)
+cli.add_command(dcard)
 
 
 @cli.command()
