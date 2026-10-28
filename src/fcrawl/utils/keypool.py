@@ -69,6 +69,7 @@ class KeyPool:
         self.state_dir = state_dir
         self.state_file = state_dir / "state.json"
         self.lock_file = state_dir / "lock"
+        self.waited = 0.0  # seconds spent sleeping in the last call()
 
     # --- state file -------------------------------------------------------
 
@@ -158,19 +159,19 @@ class KeyPool:
         """
         from firecrawl.v2.utils.error_handler import FirecrawlError
 
-        waited = 0.0
+        self.waited = 0.0
         while True:
             key, wait = self.pick()
             if key is None:
                 wait = max(wait, 0.5)
-                if waited + wait > self.max_wait:
+                if self.waited + wait > self.max_wait:
                     raise KeyPoolExhausted(
                         f"All Firecrawl API keys rate limited; next free in {wait:.0f}s "
                         f"(exceeds --max-wait {self.max_wait}s)"
                     )
                 _log(f"all keys rate limited, waiting {wait:.0f}s…")
                 time.sleep(wait)
-                waited += wait
+                self.waited += wait
                 continue
 
             try:

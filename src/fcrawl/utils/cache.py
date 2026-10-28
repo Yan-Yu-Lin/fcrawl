@@ -3,10 +3,37 @@
 import hashlib
 import json
 import shutil
+import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional, Tuple
 
 CACHE_DIR = Path("/tmp/fcrawl-cache")
+
+# Signs that a "successful" response is really a bot-challenge or error page.
+BLOCKED_TITLES = (
+    "just a moment",
+    "attention required",
+    "access denied",
+    "security check",
+    "verify you are human",
+    "are you a robot",
+)
+BLOCKED_PHRASES = (
+    "需要確認您的連線是安全的",
+    "verify you are human",
+    "enable javascript and cookies to continue",
+    "checking your browser",
+    "cf-chl",
+    "the request could not be satisfied",
+)
+SHORT_CONTENT = 2000  # only scan body text for challenge phrases when short
+
+
+def _ttl_seconds() -> int:
+    from .config import load_config
+
+    days = load_config().get("cache_ttl_days")
+    return int(days or 0) * 86400
 
 
 def cache_key(identifier: str, options: Optional[dict[str, Any]] = None) -> str:
@@ -23,14 +50,17 @@ def get_cache_path(command: str, key: str) -> Path:
 
 
 def read_cache(command: str, key: str) -> Optional[dict]:
-    """Read from cache if exists"""
+    """Read from cache if it exists and has not expired (cache_ttl_days)."""
     path = get_cache_path(command, key)
-    if path.exists():
-        try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, IOError):
-            return None
-    return None
+    if not path.exists():
+        return None
+    ttl = _ttl_seconds()
+    if ttl and time.time() - path.stat().st_mtime > ttl:
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, IOError):
+        return None
 
 
 def write_cache(command: str, key: str, data: dict):
@@ -49,6 +79,53 @@ def clear_cache(command: Optional[str] = None) -> None:
     else:
         if CACHE_DIR.exists():
             shutil.rmtree(CACHE_DIR)
+
+
+def validate_result(result) -> Tuple[bool, str]:
+    """Decide whether a scrape result is real content worth returning/caching.
+
+    Works on TaggedResult, CachedResult and plain cache dicts. Returns
+    (ok, reason); reason is empty when ok.
+    """
+    if isinstance(result, dict):
+        markdown = result.get("markdown") or ""
+        metadata = result.get("metadata") or {}
+        get = metadata.get
+    else:
+        markdown = getattr(result, "markdown", None) or ""
+        metadata = getattr(result, "metadata", None)
+        get = lambda k, d=None: getattr(metadata, k, d) if metadata is not None else d
+
+    status = get("status_code") or get("statusCode")
+    if isinstance(status, int) and status >= 400:
+        return False, f"upstream {status}"
+
+    title = str(get("title") or "").lower()
+    for marker in BLOCKED_TITLES:
+        if marker in title:
+            return False, f"blocked page: {title[:60]}"
+
+    text = markdown.strip()
+    if not text:
+        return False, "empty content"
+    if len(text) < SHORT_CONTENT:
+        lowered = text.lower()
+        for phrase in BLOCKED_PHRASES:
+            if phrase in lowered:
+                return False, f"blocked page: {phrase}"
+    return True, ""
+
+
+def iter_cache(command: str) -> Iterator[Tuple[Path, Optional[dict]]]:
+    """Yield (path, data) for every cache file of a command; data None if unreadable."""
+    folder = CACHE_DIR / command
+    if not folder.exists():
+        return
+    for path in sorted(folder.glob("*.json")):
+        try:
+            yield path, json.loads(path.read_text())
+        except (json.JSONDecodeError, IOError):
+            yield path, None
 
 
 def result_to_dict(result) -> dict:

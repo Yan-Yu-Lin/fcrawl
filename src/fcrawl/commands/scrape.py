@@ -5,7 +5,7 @@ import re
 import time
 import click
 import requests
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from types import SimpleNamespace
@@ -13,7 +13,8 @@ from rich.console import Console
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
-from ..utils.config import get_firecrawl_client
+from ..utils.config import get_firecrawl_client, get_key_pool, load_config
+from ..utils.keypool import KeyPoolExhausted
 from ..utils.output import (
     handle_output,
     console,
@@ -26,6 +27,7 @@ from ..utils.cache import (
     read_cache,
     write_cache,
     result_to_dict,
+    validate_result,
     CachedResult,
 )
 
@@ -75,9 +77,11 @@ ARTICLE_EXCLUDE_TAGS = [
 ]
 
 DEFAULT_SCRAPE_TIMEOUT = 12
-DEFAULT_JINA_FALLBACK_DELAY = 5
-MIN_JINA_FALLBACK_WINDOW = 2
 AUTO_SAVE_DIR = Path("/tmp/fcrawl-saved")
+
+
+class BlockedResult(RuntimeError):
+    """A provider answered, but with a challenge/error page instead of content."""
 
 
 class TaggedResult:
@@ -138,28 +142,21 @@ def jina_fallback_supported(
     return True
 
 
-def parse_jina_response(text: str, original_url: str) -> TaggedResult:
-    """Parse Jina Reader output into the same shape as a scrape result."""
-    metadata = {"source_url": original_url}
-    content = text
-    marker = "\nMarkdown Content:\n"
-    if marker in text:
-        header, content = text.split(marker, 1)
-        for line in header.splitlines():
-            if line.startswith("Title:"):
-                metadata["title"] = line.split(":", 1)[1].strip()
-            elif line.startswith("URL Source:"):
-                metadata["source_url"] = line.split(":", 1)[1].strip()
-            elif line.startswith("Published Time:"):
-                metadata["published_time"] = line.split(":", 1)[1].strip()
-    else:
-        content = text.strip()
-
+def parse_jina_response(data: dict, original_url: str) -> TaggedResult:
+    """Turn Jina Reader's JSON payload into the same shape as a scrape result."""
+    metadata = {
+        "source_url": data.get("url") or original_url,
+        "title": data.get("title"),
+        "published_time": data.get("publishedTime"),
+        # Jina reports the target site's real status here even when it
+        # answers 200 itself (Cloudflare challenge pages come back as 403).
+        "status_code": data.get("httpStatus"),
+    }
     result = SimpleNamespace(
-        markdown=content.lstrip(),
+        markdown=(data.get("content") or "").lstrip(),
         html=None,
         links=None,
-        metadata=SimpleNamespace(**metadata),
+        metadata=SimpleNamespace(**{k: v for k, v in metadata.items() if v is not None}),
     )
     return TaggedResult(
         result, provider="jina", fallback_url=f"https://r.jina.ai/{original_url}"
@@ -167,87 +164,108 @@ def parse_jina_response(text: str, original_url: str) -> TaggedResult:
 
 
 def scrape_with_jina(url: str, timeout: int) -> TaggedResult:
-    """Fetch markdown from Jina Reader."""
+    """Fetch markdown from Jina Reader (JSON mode so we can see httpStatus)."""
     fallback_url = f"https://r.jina.ai/{url}"
-    response = requests.get(fallback_url, timeout=timeout)
+    response = requests.get(
+        fallback_url,
+        headers={"Accept": "application/json", "X-Return-Format": "markdown"},
+        timeout=timeout,
+    )
     response.raise_for_status()
-    result = parse_jina_response(response.text, url)
+    result = parse_jina_response(response.json().get("data") or {}, url)
     result.fallback_url = fallback_url
     return result
 
 
-def scrape_with_firecrawl(url: str, scrape_options: dict, timeout: int) -> TaggedResult:
-    """Fetch content from Firecrawl with a bounded timeout."""
-    client = get_firecrawl_client()
-    result = client.scrape(url, timeout=timeout * 1000, **scrape_options)
+def scrape_with_firecrawl(
+    url: str, scrape_options: dict, timeout: int, max_wait: Optional[int]
+) -> TaggedResult:
+    """Fetch content from Firecrawl through the key pool, bounded by timeout.
+
+    429s are handled inside the pool (rotate key / wait); only other errors
+    and the deadline escape from here.
+    """
+    pool = get_key_pool(max_wait)
+
+    def attempt(key: str):
+        client = get_firecrawl_client(key)
+        return client.scrape(url, timeout=timeout * 1000, **scrape_options)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(pool.call, attempt)
+    started = time.monotonic()
+    try:
+        # Time the pool spends sleeping on rate limits is not charged to the
+        # scrape timeout: keep extending the deadline by what it has waited.
+        while True:
+            remaining = timeout + pool.waited - (time.monotonic() - started)
+            if remaining <= 0:
+                raise RuntimeError(f"Firecrawl timed out after {timeout}s")
+            try:
+                result = future.result(timeout=min(remaining, 1.0))
+                break
+            except TimeoutError:
+                continue
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     return TaggedResult(result, provider="firecrawl")
 
 
-def fetch_scrape_result(url: str, scrape_options: dict, timeout: int, allow_jina: bool):
-    """Run Firecrawl first, then Jina fallback if Firecrawl stalls or fails."""
-    deadline = time.monotonic() + timeout
-    fallback_delay = min(
-        DEFAULT_JINA_FALLBACK_DELAY,
-        max(1, timeout - MIN_JINA_FALLBACK_WINDOW),
-    )
-    executor = ThreadPoolExecutor(max_workers=2)
-    firecrawl_future = executor.submit(
-        scrape_with_firecrawl, url, scrape_options, timeout
-    )
-    pending = []
+def fetch_scrape_result(
+    url: str,
+    scrape_options: dict,
+    timeout: int,
+    allow_jina: bool,
+    max_wait: Optional[int] = None,
+):
+    """Firecrawl first; Jina only as a relay when Firecrawl fails or is blocked.
+
+    Both providers' results go through validate_result so a challenge page
+    never counts as success. 429s never reach Jina — the key pool handles
+    them.
+    """
     errors = []
-
     try:
-        done, _ = wait([firecrawl_future], timeout=fallback_delay)
-        if firecrawl_future in done:
-            try:
-                return firecrawl_future.result()
-            except Exception as exc:
-                errors.append(("firecrawl", exc))
-                if not allow_jina:
-                    raise
-                jina_timeout = max(1, int(deadline - time.monotonic()))
-                pending = [executor.submit(scrape_with_jina, url, jina_timeout)]
-        else:
-            if not allow_jina:
-                remaining = max(1, int(deadline - time.monotonic()))
-                return firecrawl_future.result(timeout=remaining)
-            jina_timeout = max(1, int(deadline - time.monotonic()))
-            jina_future = executor.submit(scrape_with_jina, url, jina_timeout)
-            pending = [firecrawl_future, jina_future]
+        result = scrape_with_firecrawl(url, scrape_options, timeout, max_wait)
+        ok, reason = validate_result(result)
+        if ok:
+            return result
+        errors.append(("firecrawl", BlockedResult(reason)))
+    except KeyPoolExhausted:
+        raise
+    except Exception as exc:
+        errors.append(("firecrawl", exc))
 
-        while pending:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
+    if allow_jina:
+        try:
+            result = scrape_with_jina(url, timeout)
+            ok, reason = validate_result(result)
+            if ok:
+                return result
+            errors.append(("jina", BlockedResult(reason)))
+        except Exception as exc:
+            errors.append(("jina", exc))
 
-            done, not_done = wait(
-                pending, timeout=remaining, return_when=FIRST_COMPLETED
-            )
-            if not done:
-                break
-
-            pending = list(not_done)
-            for future in done:
-                try:
-                    return future.result()
-                except Exception as exc:
-                    provider = "jina" if future is not firecrawl_future else "firecrawl"
-                    errors.append((provider, exc))
-
-        if errors:
-            details = "; ".join(f"{provider}: {exc}" for provider, exc in errors)
-            raise RuntimeError(f"All scrape attempts failed or timed out ({details})")
-        raise RuntimeError(f"Scrape timed out after {timeout}s")
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+    details = "; ".join(f"{provider}: {exc}" for provider, exc in errors)
+    if all(isinstance(exc, BlockedResult) for _, exc in errors):
+        raise BlockedResult(f"Blocked by the target site ({details})")
+    raise RuntimeError(f"All scrape attempts failed ({details})")
 
 
 def announce_saved_result(
-    path: str, provider: str, url: str, fallback_url: Optional[str], from_cache: bool
+    path: str,
+    provider: str,
+    url: str,
+    fallback_url: Optional[str],
+    from_cache: bool,
+    status: Optional[str] = None,
 ):
     """Emit a concise, parseable manifest line for saved results."""
-    parts = [f"path={path}", f"provider={provider}", f"url={url}"]
+    parts = [f"provider={provider}", f"url={url}"]
+    if path:
+        parts.insert(0, f"path={path}")
+    if status:
+        parts.append(f"status={status}")
     if fallback_url:
         parts.append(f"fallback_url={fallback_url}")
     if from_cache:
@@ -380,6 +398,15 @@ def format_with_metadata(result, content: str) -> str:
     is_flag=True,
     help="Save full result to an auto-generated temp file and print only its path",
 )
+@click.option(
+    "--no-jina", "no_jina", is_flag=True, help="Never fall back to Jina Reader"
+)
+@click.option(
+    "--max-wait",
+    type=int,
+    default=None,
+    help="Max seconds to wait when every Firecrawl key is rate limited (config max_wait)",
+)
 def scrape(
     url: str,
     formats: List[str],
@@ -398,6 +425,8 @@ def scrape(
     no_cache: bool,
     cache_only: bool,
     save_temp: bool,
+    no_jina: bool,
+    max_wait: Optional[int],
 ):
     """Scrape a single URL and extract content
 
@@ -462,16 +491,15 @@ def scrape(
         "include_tags": list(include_tags) if include_tags else None,
         "exclude_tags": list(exclude_tags) if exclude_tags else None,
         "wait": wait,
-        "timeout": timeout,
     }
     key = cache_key(url, cache_opts)
 
-    # Check cache first (unless --no-cache)
+    # Check cache first (unless --no-cache); ignore entries that are junk
     result = None
     from_cache = False
     if not no_cache:
         cached = read_cache("scrape", key)
-        if cached:
+        if cached and validate_result(cached)[0]:
             result = CachedResult(cached)
             from_cache = True
             console.print(f"[dim]Using cached result[/dim]")
@@ -490,23 +518,38 @@ def scrape(
         ) as progress:
             progress.add_task(f"Scraping {url}...", total=None)
 
+            allow_jina = (
+                not no_jina
+                and bool(load_config().get("jina_fallback", True))
+                and jina_fallback_supported(
+                    formats=formats,
+                    include_tags=include_tags,
+                    exclude_tags=exclude_tags,
+                    raw=raw,
+                )
+            )
             try:
                 result = fetch_scrape_result(
                     url=url,
                     scrape_options=scrape_options,
                     timeout=timeout,
-                    allow_jina=jina_fallback_supported(
-                        formats=formats,
-                        include_tags=include_tags,
-                        exclude_tags=exclude_tags,
-                        raw=raw,
-                    ),
+                    allow_jina=allow_jina,
+                    max_wait=max_wait,
                 )
                 progress.stop()
 
-                # Write to cache
+                # Only validated results reach here, so this never caches junk
                 write_cache("scrape", key, result_to_dict(result))
 
+            except BlockedResult as e:
+                progress.stop()
+                console.print(f"[red]Error: {e}[/red]")
+                if save_temp and output_path:
+                    announce_saved_result(
+                        path="", provider="none", url=url, fallback_url=None,
+                        from_cache=False, status="blocked",
+                    )
+                raise click.Abort()
             except Exception as e:
                 progress.stop()
                 console.print(f"[red]Error: {e}[/red]")
