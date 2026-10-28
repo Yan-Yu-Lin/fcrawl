@@ -22,6 +22,7 @@ from .commands.yt_search import yt_search
 from .commands.transcribe import transcribe
 from .commands.x import x
 from .commands.reddit import reddit
+from .commands.cache_cmd import cache
 from .utils.config import load_config, mask_key
 
 console = Console()
@@ -76,6 +77,7 @@ cli.add_command(yt_search)
 cli.add_command(transcribe)
 cli.add_command(x)
 cli.add_command(reddit)
+cli.add_command(cache)
 
 
 @cli.command()
