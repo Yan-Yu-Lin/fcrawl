@@ -2,13 +2,15 @@
 
 import os
 import json
+import sys
 from pathlib import Path
-from typing import Dict, Any, Optional, TYPE_CHECKING
+from typing import Dict, Any, List, Optional, TYPE_CHECKING
 
 from dotenv import load_dotenv
 
 if TYPE_CHECKING:
     from firecrawl import Firecrawl
+    from .keypool import KeyPool
 
 # Load environment variables
 load_dotenv()
@@ -16,11 +18,14 @@ load_dotenv()
 DEFAULT_CONFIG = {
     "api_url": "http://localhost:3002",
     "api_key": None,
+    "api_keys": [],  # extra Firecrawl keys (one per account) for the key pool
+    "rate_limit_per_minute": 10,  # Firecrawl Free tier /scrape budget per account
+    "max_wait": 75,  # seconds to wait when every key is rate limited
+    "jina_fallback": True,
     "serper_api_key": None,
     "twitterapi_io_key": None,
     "default_format": "markdown",
-    "cache_enabled": False,
-    "cache_duration": 3600,  # 1 hour in seconds
+    "cache_ttl_days": 7,  # 0 = never expire
 }
 
 
@@ -47,14 +52,18 @@ def load_config() -> Dict[str, Any]:
             with open(config_path, "r") as f:
                 file_config = json.load(f)
                 config.update(file_config)
-        except Exception:
-            pass  # Use defaults if config is invalid
+        except Exception as exc:
+            print(f"Warning: ignoring invalid config {config_path}: {exc}", file=sys.stderr)
 
     # Override with environment variables
     if os.getenv("FIRECRAWL_API_URL"):
         config["api_url"] = os.getenv("FIRECRAWL_API_URL")
     if os.getenv("FIRECRAWL_API_KEY"):
         config["api_key"] = os.getenv("FIRECRAWL_API_KEY")
+    if os.getenv("FIRECRAWL_API_KEYS"):
+        config["api_keys"] = [
+            k.strip() for k in os.environ["FIRECRAWL_API_KEYS"].split(",") if k.strip()
+        ]
 
     # Optional: YouTube transcript helpers (used by yt-dlp)
     # These are intentionally generic and only used if referenced by commands.
@@ -89,16 +98,29 @@ def save_config(config: Dict[str, Any], path: Optional[Path] = None):
         json.dump(config, f, indent=2)
 
 
-def get_firecrawl_client() -> "Firecrawl":
-    """Get a configured Firecrawl client"""
+def get_api_keys(config: Optional[Dict[str, Any]] = None) -> List[str]:
+    """All configured Firecrawl keys: `api_key` first, then `api_keys`, deduped."""
+    config = config or load_config()
+    keys = [config.get("api_key")] + list(config.get("api_keys") or [])
+    return list(dict.fromkeys(k for k in keys if k))
+
+
+def mask_key(key: Optional[str]) -> str:
+    if not key:
+        return str(key)
+    return f"{key[:3]}…{key[-4:]}" if len(key) > 8 else "…"
+
+
+def get_firecrawl_client(api_key: Optional[str] = None) -> "Firecrawl":
+    """Get a configured Firecrawl client (optionally for a specific key)."""
     # Import lazily so commands that only need load_config()
     # (e.g. yt-transcript) don't pay the import cost.
     from firecrawl import Firecrawl
 
     config = load_config()
 
+    api_key = api_key or config.get("api_key")
     # For local instances, use a dummy API key if none is set
-    api_key = config.get("api_key")
     if not api_key and "localhost" in config["api_url"]:
         api_key = "local-dummy-key"
 
@@ -108,3 +130,28 @@ def get_firecrawl_client() -> "Firecrawl":
     }
 
     return Firecrawl(**client_args)
+
+
+def get_key_pool(max_wait: Optional[int] = None) -> "KeyPool":
+    """Key pool over every configured Firecrawl key.
+
+    Self-hosted (localhost) instances have no rate limit and need no key, so
+    the pool degrades to a single dummy key there.
+    """
+    from .keypool import KeyPool
+
+    config = load_config()
+    keys = get_api_keys(config)
+    if not keys and "localhost" in config["api_url"]:
+        keys = ["local-dummy-key"]
+    return KeyPool(
+        keys,
+        rate_limit=int(config.get("rate_limit_per_minute") or 10),
+        max_wait=int(max_wait if max_wait is not None else config.get("max_wait") or 75),
+    )
+
+
+def firecrawl_call(fn, max_wait: Optional[int] = None):
+    """Run fn(client) through the key pool, rotating keys on 429."""
+    pool = get_key_pool(max_wait)
+    return pool.call(lambda key: fn(get_firecrawl_client(key)))

@@ -22,7 +22,7 @@ from .commands.yt_search import yt_search
 from .commands.transcribe import transcribe
 from .commands.x import x
 from .commands.reddit import reddit
-from .utils.config import load_config, get_firecrawl_client
+from .utils.config import load_config, mask_key
 
 console = Console()
 
@@ -84,6 +84,10 @@ def config():
     config_data = load_config()
     console.print("[bold cyan]Current Configuration:[/bold cyan]")
     for key, value in config_data.items():
+        if key == "api_keys":
+            value = [mask_key(k) for k in value]
+        elif key.endswith("_key"):
+            value = mask_key(value)
         console.print(f"  {key}: {value}")
 
 
