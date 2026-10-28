@@ -10,23 +10,30 @@ from typing import Any, Iterator, Optional, Tuple
 CACHE_DIR = Path("/tmp/fcrawl-cache")
 
 # Signs that a "successful" response is really a bot-challenge or error page.
+# Titles are matched whole (after stripping " | Site" suffixes) so an article
+# called "How to fix Access Denied in Windows" is not mistaken for a block.
 BLOCKED_TITLES = (
+    "just a moment...",
     "just a moment",
+    "attention required!",
     "attention required",
     "access denied",
     "security check",
     "verify you are human",
-    "are you a robot",
+    "are you a robot?",
+    "請稍候…",
 )
+# Body phrases only count on very short pages: a real challenge page is a few
+# hundred characters, while an article that merely quotes one is longer.
 BLOCKED_PHRASES = (
     "需要確認您的連線是安全的",
-    "verify you are human",
+    "verify you are human by completing the action below",
     "enable javascript and cookies to continue",
-    "checking your browser",
+    "checking your browser before accessing",
     "cf-chl",
     "the request could not be satisfied",
 )
-SHORT_CONTENT = 2000  # only scan body text for challenge phrases when short
+SHORT_CONTENT = 800
 
 
 def _ttl_seconds() -> int:
@@ -73,6 +80,8 @@ def write_cache(command: str, key: str, data: dict):
 def clear_cache(command: Optional[str] = None) -> None:
     """Clear cache for a command or all commands"""
     if command:
+        if command != Path(command).name or command in (".", ".."):
+            raise ValueError(f"not a cache bucket name: {command!r}")
         path = CACHE_DIR / command
         if path.exists():
             shutil.rmtree(path)
@@ -88,11 +97,11 @@ def validate_result(result) -> Tuple[bool, str]:
     (ok, reason); reason is empty when ok.
     """
     if isinstance(result, dict):
-        markdown = result.get("markdown") or ""
+        get_field = result.get
         metadata = result.get("metadata") or {}
         get = metadata.get
     else:
-        markdown = getattr(result, "markdown", None) or ""
+        get_field = lambda k: getattr(result, k, None)
         metadata = getattr(result, "metadata", None)
         get = lambda k, d=None: getattr(metadata, k, d) if metadata is not None else d
 
@@ -100,16 +109,18 @@ def validate_result(result) -> Tuple[bool, str]:
     if isinstance(status, int) and status >= 400:
         return False, f"upstream {status}"
 
-    title = str(get("title") or "").lower()
-    for marker in BLOCKED_TITLES:
-        if marker in title:
-            return False, f"blocked page: {title[:60]}"
+    # "Just a moment... | Cloudflare" -> "just a moment..."
+    title = str(get("title") or "").strip().lower()
+    base_title = title.split(" | ")[0].split(" - ")[0].strip()
+    if base_title in BLOCKED_TITLES:
+        return False, f"blocked page: {title[:60]}"
 
-    text = markdown.strip()
-    if not text:
+    markdown = (get_field("markdown") or "").strip()
+    has_other = any(get_field(k) for k in ("html", "screenshot", "links"))
+    if not markdown and not has_other:
         return False, "empty content"
-    if len(text) < SHORT_CONTENT:
-        lowered = text.lower()
+    if markdown and len(markdown) < SHORT_CONTENT:
+        lowered = markdown.lower()
         for phrase in BLOCKED_PHRASES:
             if phrase in lowered:
                 return False, f"blocked page: {phrase}"

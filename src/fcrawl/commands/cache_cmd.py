@@ -70,5 +70,8 @@ def clean(yes: bool):
 @click.argument("command", required=False)
 def clear(command):
     """Delete the whole cache, or one command's folder (scrape, search, …)"""
-    clear_cache(command)
+    try:
+        clear_cache(command)
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="COMMAND")
     console.print(f"[green]Cleared {command or 'all'} cache[/green]")

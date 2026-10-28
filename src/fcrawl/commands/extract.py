@@ -6,7 +6,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from typing import Optional, List
 
-from ..utils.config import firecrawl_call
+from ..utils.config import firecrawl_job
 from ..utils.output import handle_output, console, resolve_pretty
 
 
@@ -87,7 +87,12 @@ def extract(
 
             # For v2 API, extract returns immediately with the data
             # (unlike the v1 API which required polling)
-            result = firecrawl_call(lambda client: client.extract(**extract_options))
+            from firecrawl.v2.methods.extract import wait_extract
+
+            result = firecrawl_job(
+                lambda client: client.start_extract(**extract_options),
+                lambda client, job_id: wait_extract(client.http_client, job_id),
+            )
 
             progress.update(task, completed=True)
 

@@ -5,6 +5,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Dict, Any, List, Optional, TYPE_CHECKING
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -111,6 +112,12 @@ def mask_key(key: Optional[str]) -> str:
     return f"{key[:3]}…{key[-4:]}" if len(key) > 8 else "…"
 
 
+def is_self_hosted(api_url: str) -> bool:
+    """Loopback Firecrawl: no API key and no cloud rate limit."""
+    host = urlparse(api_url).hostname or ""
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
 def get_firecrawl_client(api_key: Optional[str] = None) -> "Firecrawl":
     """Get a configured Firecrawl client (optionally for a specific key)."""
     # Import lazily so commands that only need load_config()
@@ -121,7 +128,7 @@ def get_firecrawl_client(api_key: Optional[str] = None) -> "Firecrawl":
 
     api_key = api_key or config.get("api_key")
     # For local instances, use a dummy API key if none is set
-    if not api_key and "localhost" in config["api_url"]:
+    if not api_key and is_self_hosted(config["api_url"]):
         api_key = "local-dummy-key"
 
     client_args = {
@@ -142,8 +149,10 @@ def get_key_pool(max_wait: Optional[int] = None) -> "KeyPool":
 
     config = load_config()
     keys = get_api_keys(config)
-    if not keys and "localhost" in config["api_url"]:
-        keys = ["local-dummy-key"]
+    if is_self_hosted(config["api_url"]):
+        # One dummy key with no per-minute budget: the local server has no
+        # rate limit and the state file would otherwise throttle it.
+        return KeyPool(keys or ["local-dummy-key"], rate_limit=10**9, max_wait=0)
     return KeyPool(
         keys,
         rate_limit=int(config.get("rate_limit_per_minute") or 10),
@@ -152,6 +161,30 @@ def get_key_pool(max_wait: Optional[int] = None) -> "KeyPool":
 
 
 def firecrawl_call(fn, max_wait: Optional[int] = None):
-    """Run fn(client) through the key pool, rotating keys on 429."""
+    """Run fn(client) through the key pool, rotating keys on 429.
+
+    fn must be a single request. Multi-step SDK calls (crawl/extract, which
+    start a job and then poll it) should pool only the job start, see
+    firecrawl_job().
+    """
     pool = get_key_pool(max_wait)
     return pool.call(lambda key: fn(get_firecrawl_client(key)))
+
+
+def firecrawl_job(start, wait, max_wait: Optional[int] = None):
+    """Pool the job-start request, then poll on the same client/key.
+
+    start(client) -> job (something with .id); wait(client, job_id) -> result.
+    Polling never switches key: a 429 on a status check must not create a
+    second job on another account.
+    """
+    pool = get_key_pool(max_wait)
+    holder: dict = {}
+
+    def begin(key: str):
+        client = get_firecrawl_client(key)
+        holder["client"] = client
+        return start(client)
+
+    job = pool.call(begin)
+    return wait(holder["client"], job.id)

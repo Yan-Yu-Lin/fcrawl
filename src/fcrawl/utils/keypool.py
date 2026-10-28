@@ -69,7 +69,8 @@ class KeyPool:
         self.state_dir = state_dir
         self.state_file = state_dir / "state.json"
         self.lock_file = state_dir / "lock"
-        self.waited = 0.0  # seconds spent sleeping in the last call()
+        self.waited = 0.0  # seconds of rate-limit sleep in the current call(), counted as the sleep starts
+        self.cancelled = False  # set by the owner to stop call() from issuing further requests
 
     # --- state file -------------------------------------------------------
 
@@ -122,16 +123,23 @@ class KeyPool:
             if not usable:
                 raise KeyPoolExhausted("All Firecrawl API keys are disabled (401/402)")
 
-            ready = [(k, e) for k, e in usable if e["cooldown_until"] <= now]
+            # A key is free when it is off cooldown and still has budget in
+            # the rolling window; otherwise note when it next becomes free.
+            def free_at(entry: dict) -> float:
+                budget_at = (
+                    entry["recent"][0] + WINDOW_SECONDS
+                    if len(entry["recent"]) >= self.rate_limit
+                    else 0
+                )
+                return max(entry["cooldown_until"], budget_at)
+
+            ready = [(k, e) for k, e in usable if free_at(e) <= now]
             if not ready:
-                soonest = min(e["cooldown_until"] for _, e in usable)
-                return None, soonest - now
+                return None, min(free_at(e) for _, e in usable) - now
 
             key, entry = min(
                 ready, key=lambda ke: (len(ke[1]["recent"]), ke[1]["recent"][-1] if ke[1]["recent"] else 0)
             )
-            if len(entry["recent"]) >= self.rate_limit:
-                return None, entry["recent"][0] + WINDOW_SECONDS - now
             entry["recent"].append(now)
             return key, 0.0
 
@@ -139,7 +147,9 @@ class KeyPool:
 
     def mark_rate_limited(self, key: str, retry_after: int) -> None:
         def update(state: dict):
-            self._entry(state, key)["cooldown_until"] = time.time() + retry_after
+            entry = self._entry(state, key)
+            # Never shorten a cooldown another process already recorded
+            entry["cooldown_until"] = max(entry["cooldown_until"], time.time() + retry_after)
 
         self._locked(update)
 
@@ -161,6 +171,8 @@ class KeyPool:
 
         self.waited = 0.0
         while True:
+            if self.cancelled:
+                raise KeyPoolExhausted("cancelled")
             key, wait = self.pick()
             if key is None:
                 wait = max(wait, 0.5)
@@ -170,10 +182,12 @@ class KeyPool:
                         f"(exceeds --max-wait {self.max_wait}s)"
                     )
                 _log(f"all keys rate limited, waiting {wait:.0f}s…")
+                self.waited += wait  # before sleeping, so deadlines see it immediately
                 time.sleep(wait)
-                self.waited += wait
                 continue
 
+            if self.cancelled:
+                raise KeyPoolExhausted("cancelled")
             try:
                 return fn(key)
             except FirecrawlError as exc:

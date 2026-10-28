@@ -44,9 +44,18 @@ def fetch_json(url: str, timeout: int, no_cache: bool) -> Any:
     result = firecrawl_call(
         lambda client: client.scrape(url, formats=["markdown"], timeout=timeout * 1000)
     )
-    markdown = result.markdown or ""
-    match = re.search(r"```json\s*(.*?)```", markdown, re.S)
-    data = json.loads(match.group(1) if match else markdown)
+    status = getattr(result.metadata, "status_code", None)
+    if isinstance(status, int) and status >= 400:
+        raise RuntimeError(f"Dcard API returned {status} for {url}")
+    # Firecrawl wraps the JSON body in a ```json fence; strip only the outer
+    # fence lines so backticks inside post content cannot cut the JSON short.
+    markdown = (result.markdown or "").strip()
+    if markdown.startswith("```"):
+        markdown = markdown.split("\n", 1)[1] if "\n" in markdown else ""
+        markdown = markdown.rsplit("```", 1)[0]
+    data = json.loads(markdown)
+    if isinstance(data, dict) and "error" in data and "id" not in data:
+        raise RuntimeError(f"Dcard API error: {data.get('message') or data['error']}")
     write_cache("dcard", key, data)
     return data
 

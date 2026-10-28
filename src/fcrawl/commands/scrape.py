@@ -200,6 +200,9 @@ def scrape_with_firecrawl(
         while True:
             remaining = timeout + pool.waited - (time.monotonic() - started)
             if remaining <= 0:
+                # Stop the worker from issuing another (paid) request once
+                # we have given up on it; an in-flight HTTP call still ends.
+                pool.cancelled = True
                 raise RuntimeError(f"Firecrawl timed out after {timeout}s")
             try:
                 result = future.result(timeout=min(remaining, 1.0))
@@ -491,6 +494,9 @@ def scrape(
         "include_tags": list(include_tags) if include_tags else None,
         "exclude_tags": list(exclude_tags) if exclude_tags else None,
         "wait": wait,
+        # timeout does not affect content, but it has always been part of the
+        # key; pin it so existing cache entries stay reachable
+        "timeout": DEFAULT_SCRAPE_TIMEOUT,
     }
     key = cache_key(url, cache_opts)
 
