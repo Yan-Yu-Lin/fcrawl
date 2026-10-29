@@ -464,12 +464,11 @@ def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, 
             attach_replies(post_id, comments, reply_threads, "oldest", timeout, no_cache, by_likes=reply_by_likes)
         return post, comments
 
-    limited = limit > 0 and not no_comments
     if len(url_or_ids) == 1:
         post, comments = run(f"Fetching Dcard post {ids[0]}...", lambda: fetch_one(ids[0]))
         emit(
             {"post": post_to_dict(post), "comments": [comment_to_dict(c) for c in comments]},
-            render_post(post, comments, limited), output, json_output, pretty,
+            render_post(post, comments, limit > 0 and len(comments) >= limit), output, json_output, pretty,
         )
         return
 
@@ -506,7 +505,7 @@ def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, 
                 ensure_ascii=False, indent=2 if pretty else None,
             ))
         else:
-            path.write_text(render_post(post, comments, limited))
+            path.write_text(render_post(post, comments, limit > 0 and len(comments) >= limit))
         p = post_to_dict(post)
         print(f"RESULT path={path} id={post_id} likes={p['likes']} comments={p['comment_count']} title={one_line(p['title'])}")
     if failed:
