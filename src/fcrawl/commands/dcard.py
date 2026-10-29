@@ -263,7 +263,7 @@ def forum_to_dict(forum: dict) -> dict:
     }
 
 
-def render_post(post: dict, comments: list) -> str:
+def render_post(post: dict, comments: list, limited: bool = False) -> str:
     p = post_to_dict(post)
     author = p["author"] or "匿名"
     if p["author_detail"]:
@@ -282,7 +282,7 @@ def render_post(post: dict, comments: list) -> str:
     if comments:
         total = p["comment_count"] or len(comments)
         shown = f"顯示 {len(comments)} / 共 {total}" if len(comments) < total else f"共 {len(comments)}"
-        if len(comments) < total:
+        if len(comments) < total and limited:
             shown += "，--limit 0 看全部"
         lines += ["", "---", "", f"## 留言（{shown}）", ""]
         for raw in comments:
@@ -312,6 +312,10 @@ def render_comment(raw: dict, indent: str = "") -> list:
     return lines
 
 
+def one_line(text: Optional[str]) -> str:
+    return " ".join((text or "").split())
+
+
 def filter_posts(posts: list, min_likes: int, by_likes: bool) -> list:
     if min_likes:
         posts = [p for p in posts if (p.get("likeCount") or 0) >= min_likes]
@@ -331,7 +335,7 @@ def render_post_list(
         p = post_to_dict(raw)
         date = tw_time(p["created_at"])[:10]
         if compact:
-            title_cell = (p["title"] or "").replace("|", "\\|")
+            title_cell = one_line(p["title"]).replace("|", "\\|")
             lines.append(f"| {p['likes']} | {p['comment_count']} | {date} | {p['id']} | {title_cell} |")
             continue
         comments = f"留言 {p['comment_count']}"
@@ -358,10 +362,14 @@ def emit(data_for_json, text: str, output: Optional[str], json_output: bool, pre
         save_to_file(text, output, fmt)
     else:
         print(text)
+
+
+def print_credits() -> None:
     console.print(f"[dim]credits: {stats['requests']} ({stats['cached']} cached)[/dim]")
 
 
 def run(label: str, fn):
+    """Run fn under a spinner; the credit line is printed whether it succeeds or not."""
     with Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"), console=console
     ) as progress:
@@ -372,6 +380,9 @@ def run(label: str, fn):
             progress.stop()
             console.print(f"[red]Error: {exc}[/red]")
             raise click.Abort()
+        finally:
+            progress.stop()
+            print_credits()
 
 
 def list_options(fn):
@@ -438,13 +449,13 @@ def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, 
         fcrawl dcard post 261218190 258383705 258164563 -o posts/   # 3 at a time
     """
     pretty = resolve_pretty(pretty)
-    ids = [parse_post_id(x) for x in url_or_ids]
-    if replies == "auto":
-        reply_threads, reply_by_likes = 3, True
-    elif replies.startswith("auto:"):
-        reply_threads, reply_by_likes = int(replies.split(":", 1)[1]), True
-    else:
-        reply_threads, reply_by_likes = int(replies), False
+    # 3: a URL and its bare ID normalise to the same post; fetch it once
+    ids = list(dict.fromkeys(parse_post_id(x) for x in url_or_ids))
+    reply_by_likes = replies.startswith("auto")
+    count_text = "3" if replies == "auto" else replies.split(":", 1)[1] if reply_by_likes else replies
+    if not count_text.isdigit():
+        raise click.BadParameter("use N, auto, or auto:N", param_hint="--replies")
+    reply_threads = int(count_text)
 
     def fetch_one(post_id: str):
         post = fetch_json(f"{API}/posts/{post_id}", timeout, no_cache)
@@ -453,25 +464,41 @@ def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, 
             attach_replies(post_id, comments, reply_threads, "oldest", timeout, no_cache, by_likes=reply_by_likes)
         return post, comments
 
-    if len(ids) == 1:
+    limited = limit > 0 and not no_comments
+    if len(url_or_ids) == 1:
         post, comments = run(f"Fetching Dcard post {ids[0]}...", lambda: fetch_one(ids[0]))
         emit(
             {"post": post_to_dict(post), "comments": [comment_to_dict(c) for c in comments]},
-            render_post(post, comments), output, json_output, pretty,
+            render_post(post, comments, limited), output, json_output, pretty,
         )
         return
 
     if not output:
         raise click.BadParameter("give -o <directory> when fetching several posts", param_hint="-o")
     out_dir = Path(output)
+    if out_dir.exists() and not out_dir.is_dir():
+        raise click.BadParameter(f"{output} is a file; give a directory", param_hint="-o")
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1: one bad post must not throw away the others — collect per-post outcomes
+    def fetch_safe(post_id: str):
+        try:
+            return fetch_one(post_id)
+        except Exception as exc:
+            return exc
 
     def work():
         with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
-            return list(pool.map(fetch_one, ids))
+            return list(pool.map(fetch_safe, ids))
 
     results = run(f"Fetching {len(ids)} Dcard posts ({parallel} at a time)...", work)
-    for post_id, (post, comments) in zip(ids, results):
+    failed = []
+    for post_id, outcome in zip(ids, results):
+        if isinstance(outcome, Exception):
+            failed.append(post_id)
+            print(f"RESULT id={post_id} status=failed error={one_line(str(outcome))[:200]}")
+            continue
+        post, comments = outcome
         path = out_dir / f"{post_id}.{'json' if json_output else 'md'}"
         if json_output:
             path.write_text(json.dumps(
@@ -479,10 +506,12 @@ def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, 
                 ensure_ascii=False, indent=2 if pretty else None,
             ))
         else:
-            path.write_text(render_post(post, comments))
+            path.write_text(render_post(post, comments, limited))
         p = post_to_dict(post)
-        print(f"RESULT path={path} id={post_id} likes={p['likes']} comments={p['comment_count']} title={p['title']}")
-    console.print(f"[dim]credits: {stats['requests']} ({stats['cached']} cached)[/dim]")
+        print(f"RESULT path={path} id={post_id} likes={p['likes']} comments={p['comment_count']} title={one_line(p['title'])}")
+    if failed:
+        console.print(f"[red]{len(failed)} of {len(ids)} posts failed: {', '.join(failed)}[/red]")
+        raise click.exceptions.Exit(1)
 
 
 @dcard.command(name="search")
