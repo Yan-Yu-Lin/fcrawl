@@ -9,6 +9,9 @@ details: ~/30-39-Research/34-tech-research/2026-10-29-dcard-api.md
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlencode
 
@@ -30,6 +33,21 @@ DEFAULT_TIMEOUT = 40  # Firecrawl has been seen taking ~20s on these endpoints
 SEARCH_PAGE = 30  # v3 search caps limit at 30
 FORUM_PAGE = 100  # v2 forum list returns up to 100 per request
 COMMENT_PAGE = 30
+TAIPEI = timezone(timedelta(hours=8))
+
+# Per-process request accounting, printed on stderr at the end of a command
+stats = {"requests": 0, "cached": 0}
+
+
+def tw_time(iso: Optional[str]) -> str:
+    """'2026-04-01T10:30:04.028Z' -> '2026-04-01 18:30' (Taiwan time)."""
+    if not iso:
+        return ""
+    try:
+        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return iso[:16]
+    return dt.astimezone(TAIPEI).strftime("%Y-%m-%d %H:%M")
 
 
 def parse_post_id(url_or_id: str) -> str:
@@ -47,10 +65,25 @@ def fetch_json(url: str, timeout: int, no_cache: bool) -> Any:
     if not no_cache:
         cached = read_cache("dcard", key)
         if cached is not None and not is_error_envelope(cached):
+            stats["cached"] += 1
             return cached
-    result = firecrawl_call(
-        lambda client: client.scrape(url, formats=["markdown"], timeout=timeout * 1000)
-    )
+    result = None
+    for attempt in (1, 2):
+        stats["requests"] += 1
+        try:
+            result = firecrawl_call(
+                lambda client: client.scrape(url, formats=["markdown"], timeout=timeout * 1000)
+            )
+            break
+        except Exception as exc:
+            # Firecrawl occasionally stalls on these endpoints; one retry
+            # (which the pool may route to another key) almost always works.
+            if attempt == 1 and "timed out" in str(exc).lower():
+                console.print(f"[yellow]Firecrawl timeout ({timeout}s), retrying once…[/yellow]")
+                continue
+            if "timed out" in str(exc).lower():
+                raise RuntimeError(f"Firecrawl timed out twice ({timeout}s) on {url} — try --timeout 60")
+            raise
     status = getattr(result.metadata, "status_code", None)
     if isinstance(status, int) and status >= 400:
         raise RuntimeError(f"Dcard API returned {status} for {url}")
@@ -99,16 +132,18 @@ def fetch_comments(
 
 
 def attach_replies(
-    post_id: str, comments: list, max_threads: int, sort: str, timeout: int, no_cache: bool
+    post_id: str, comments: list, max_threads: int, sort: str, timeout: int, no_cache: bool,
+    by_likes: bool = False,
 ) -> None:
-    """Fetch sub-replies for up to max_threads top-level comments (1 credit each)."""
-    expanded = 0
-    for c in comments:
-        if expanded >= max_threads:
-            break
-        if c.get("subCommentCount") and c.get("id"):
-            c["_replies"] = fetch_comments(post_id, 0, sort, timeout, no_cache, parent_id=c["id"])
-            expanded += 1
+    """Fetch sub-replies for up to max_threads threads (1 credit per 30 replies each).
+
+    by_likes picks the most-liked threads instead of the first ones in order.
+    """
+    threads = [c for c in comments if c.get("subCommentCount") and c.get("id")]
+    if by_likes:
+        threads.sort(key=lambda c: c.get("likeCount") or 0, reverse=True)
+    for c in threads[:max_threads]:
+        c["_replies"] = fetch_comments(post_id, 0, sort, timeout, no_cache, parent_id=c["id"])
 
 
 # --- post lists (search / forum) --------------------------------------------
@@ -237,14 +272,19 @@ def render_post(post: dict, comments: list) -> str:
         f"# {p['title']}",
         "",
         f"- 看板: {p['forum']}  作者: {author}  性別: {p['gender']}",
-        f"- 發文: {p['created_at']}  讚: {p['likes']}  留言: {p['comment_count']}",
+        f"- 發文: {tw_time(p['created_at'])}  讚: {p['likes']}  留言: {p['comment_count']}"
+        + (f" (含回覆 {p['total_comment_count']})" if p["total_comment_count"] and p["total_comment_count"] != p["comment_count"] else ""),
         f"- 話題: {', '.join(p['topics'])}" if p["topics"] else None,
         f"- URL: {p['url']}",
         "",
         p["content"] or "",
     ]
     if comments:
-        lines += ["", "---", "", f"## 留言 ({len(comments)})", ""]
+        total = p["comment_count"] or len(comments)
+        shown = f"顯示 {len(comments)} / 共 {total}" if len(comments) < total else f"共 {len(comments)}"
+        if len(comments) < total:
+            shown += "，--limit 0 看全部"
+        lines += ["", "---", "", f"## 留言（{shown}）", ""]
         for raw in comments:
             lines += render_comment(raw)
     return "\n".join(line for line in lines if line is not None)
@@ -256,10 +296,14 @@ def render_comment(raw: dict, indent: str = "") -> list:
     if c["is_op"]:
         who += " (原PO)"
     label = c["doorplate"] or c["floor"]
-    head = f"{indent}**B{label}** {who} · 讚 {c['likes']}"
+    if c["hidden"]:
+        head = f"{indent}**B{label}** (已隱藏)"
+        body = ""
+    else:
+        head = f"{indent}**B{label}** {who} · 讚 {c['likes'] or 0} · {tw_time(c['created_at'])}"
+        body = c["content"] or ""
     if c["replies"]:
         head += f" · 回覆 {c['replies']}"
-    body = "(已隱藏)" if c["hidden"] else (c["content"] or "")
     if indent:
         body = "\n".join(indent + line for line in body.splitlines()) or indent
     lines = [head, "", body, ""]
@@ -268,14 +312,34 @@ def render_comment(raw: dict, indent: str = "") -> list:
     return lines
 
 
-def render_post_list(title: str, posts: list, related: Optional[list] = None) -> str:
+def filter_posts(posts: list, min_likes: int, by_likes: bool) -> list:
+    if min_likes:
+        posts = [p for p in posts if (p.get("likeCount") or 0) >= min_likes]
+    if by_likes:
+        posts = sorted(posts, key=lambda p: p.get("likeCount") or 0, reverse=True)
+    return posts
+
+
+def render_post_list(
+    title: str, posts: list, related: Optional[list] = None, compact: bool = False
+) -> str:
     lines = [f"# {title}", "", f"{len(posts)} 篇", ""]
+    if compact:
+        lines.append("| 讚 | 留言 | 日期 | ID | 標題 |")
+        lines.append("|---:|---:|---|---|---|")
     for raw in posts:
         p = post_to_dict(raw)
+        date = tw_time(p["created_at"])[:10]
+        if compact:
+            title_cell = (p["title"] or "").replace("|", "\\|")
+            lines.append(f"| {p['likes']} | {p['comment_count']} | {date} | {p['id']} | {title_cell} |")
+            continue
         comments = f"留言 {p['comment_count']}"
         if p["total_comment_count"] and p["total_comment_count"] != p["comment_count"]:
             comments += f" (含回覆 {p['total_comment_count']})"
-        lines.append(f"- **{p['title']}**  [{p['forum']}] 讚 {p['likes']} {comments} · {(p['created_at'] or '')[:10]}")
+        author = p["author"] or "匿名"
+        topics = f" #{' #'.join(p['topics'][:4])}" if p["topics"] else ""
+        lines.append(f"- **{p['title']}**  [{p['forum']}] {author} · 讚 {p['likes']} {comments} · {date}{topics}")
         lines.append(f"  {p['url']}")
         if p["excerpt"]:
             lines.append(f"  {p['excerpt'][:160]}")
@@ -294,6 +358,7 @@ def emit(data_for_json, text: str, output: Optional[str], json_output: bool, pre
         save_to_file(text, output, fmt)
     else:
         print(text)
+    console.print(f"[dim]credits: {stats['requests']} ({stats['cached']} cached)[/dim]")
 
 
 def run(label: str, fn):
@@ -307,6 +372,16 @@ def run(label: str, fn):
             progress.stop()
             console.print(f"[red]Error: {exc}[/red]")
             raise click.Abort()
+
+
+def list_options(fn):
+    for opt in reversed([
+        click.option("--compact", is_flag=True, help="One table row per post, no excerpt (fits 300 posts in ~10k tokens)"),
+        click.option("--min-likes", type=int, default=0, help="Drop posts with fewer likes (after fetching)"),
+        click.option("--by-likes", is_flag=True, help="Sort the fetched posts by likes"),
+    ]):
+        fn = opt(fn)
+    return fn
 
 
 def common_options(fn):
@@ -333,7 +408,7 @@ def dcard():
 
 
 @dcard.command(name="post")
-@click.argument("url_or_id")
+@click.argument("url_or_ids", nargs=-1, required=True)
 @click.option(
     "--limit", "-l", type=int, default=30, show_default=True,
     help="Max top-level comments (0 = all, 30 per credit)",
@@ -343,35 +418,71 @@ def dcard():
     help="Comment order",
 )
 @click.option(
-    "--replies", type=int, default=0, show_default=True,
-    help="Expand sub-replies for up to N comments that have them (1 credit per 30 replies in each)",
+    "--replies", default="0", show_default=True,
+    help="Expand sub-replies: N = first N threads in order, 'auto' = 3 most-liked threads, "
+         "'auto:N' = N most-liked (1 credit per 30 replies in each thread)",
 )
 @click.option("--no-comments", is_flag=True, help="Fetch only the post")
+@click.option("--parallel", type=int, default=3, show_default=True, help="Concurrent fetches when given several posts")
 @common_options
-def dcard_post(url_or_id, limit, sort, replies, no_comments, output, json_output, pretty, timeout, no_cache):
-    """Fetch a Dcard post with its comments.
+def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, json_output, pretty, timeout, no_cache):
+    """Fetch one or more Dcard posts with comments.
+
+    With several IDs, -o must be a directory (one <id>.md / <id>.json per post).
 
     \b
     Examples:
         fcrawl dcard post https://www.dcard.tw/f/military/p/261218190
         fcrawl dcard post 261218190 --limit 0 --replies 10   # all comments, expand 10 reply threads
-        fcrawl dcard post 261218190 --sort likes --json
+        fcrawl dcard post 261218190 --sort likes --replies auto
+        fcrawl dcard post 261218190 258383705 258164563 -o posts/   # 3 at a time
     """
     pretty = resolve_pretty(pretty)
-    post_id = parse_post_id(url_or_id)
+    ids = [parse_post_id(x) for x in url_or_ids]
+    if replies == "auto":
+        reply_threads, reply_by_likes = 3, True
+    elif replies.startswith("auto:"):
+        reply_threads, reply_by_likes = int(replies.split(":", 1)[1]), True
+    else:
+        reply_threads, reply_by_likes = int(replies), False
 
-    def work():
+    def fetch_one(post_id: str):
         post = fetch_json(f"{API}/posts/{post_id}", timeout, no_cache)
         comments = [] if no_comments else fetch_comments(post_id, limit, sort, timeout, no_cache)
-        if replies:
-            attach_replies(post_id, comments, replies, "oldest", timeout, no_cache)
+        if reply_threads:
+            attach_replies(post_id, comments, reply_threads, "oldest", timeout, no_cache, by_likes=reply_by_likes)
         return post, comments
 
-    post, comments = run(f"Fetching Dcard post {post_id}...", work)
-    emit(
-        {"post": post_to_dict(post), "comments": [comment_to_dict(c) for c in comments]},
-        render_post(post, comments), output, json_output, pretty,
-    )
+    if len(ids) == 1:
+        post, comments = run(f"Fetching Dcard post {ids[0]}...", lambda: fetch_one(ids[0]))
+        emit(
+            {"post": post_to_dict(post), "comments": [comment_to_dict(c) for c in comments]},
+            render_post(post, comments), output, json_output, pretty,
+        )
+        return
+
+    if not output:
+        raise click.BadParameter("give -o <directory> when fetching several posts", param_hint="-o")
+    out_dir = Path(output)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def work():
+        with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+            return list(pool.map(fetch_one, ids))
+
+    results = run(f"Fetching {len(ids)} Dcard posts ({parallel} at a time)...", work)
+    for post_id, (post, comments) in zip(ids, results):
+        path = out_dir / f"{post_id}.{'json' if json_output else 'md'}"
+        if json_output:
+            path.write_text(json.dumps(
+                {"post": post_to_dict(post), "comments": [comment_to_dict(c) for c in comments]},
+                ensure_ascii=False, indent=2 if pretty else None,
+            ))
+        else:
+            path.write_text(render_post(post, comments))
+        p = post_to_dict(post)
+        print(f"RESULT path={path} id={post_id} likes={p['likes']} comments={p['comment_count']} title={p['title']}")
+    console.print(f"[dim]credits: {stats['requests']} ({stats['cached']} cached)[/dim]")
 
 
 @dcard.command(name="search")
@@ -389,8 +500,9 @@ def dcard_post(url_or_id, limit, sort, replies, no_comments, output, json_output
 @click.option(
     "--limit", "-l", type=int, default=30, show_default=True, help="Max posts (0 = all, 30 per credit)"
 )
+@list_options
 @common_options
-def dcard_search(query, forum, sort, field, since, limit, output, json_output, pretty, timeout, no_cache):
+def dcard_search(query, forum, sort, field, since, limit, compact, min_likes, by_likes, output, json_output, pretty, timeout, no_cache):
     """Search Dcard posts (titles + excerpts; use `dcard post` for full text).
 
     \b
@@ -403,10 +515,11 @@ def dcard_search(query, forum, sort, field, since, limit, output, json_output, p
         f"Searching Dcard for {query}...",
         lambda: fetch_search(query, limit, sort, field, forum, since, timeout, no_cache),
     )
+    posts = filter_posts(posts, min_likes, by_likes)
     title = f"Dcard 搜尋「{query}」" + (f" @ {forum}" if forum else "") + f" · {sort}"
     emit(
         {"query": query, "posts": [post_to_dict(p) for p in posts], "related_queries": related},
-        render_post_list(title, posts, related), output, json_output, pretty,
+        render_post_list(title, posts, related, compact), output, json_output, pretty,
     )
 
 
@@ -417,8 +530,9 @@ def dcard_search(query, forum, sort, field, since, limit, output, json_output, p
 @click.option(
     "--limit", "-l", type=int, default=30, show_default=True, help="Max posts (0 = all, 30 per credit)"
 )
+@list_options
 @common_options
-def dcard_topic(name, hot, forum, limit, output, json_output, pretty, timeout, no_cache):
+def dcard_topic(name, hot, forum, limit, compact, min_likes, by_likes, output, json_output, pretty, timeout, no_cache):
     """Posts tagged with a topic (Dcard's topic page = search with field=topics).
 
     \b
@@ -432,9 +546,10 @@ def dcard_topic(name, hot, forum, limit, output, json_output, pretty, timeout, n
         f"Fetching Dcard topic {name}...",
         lambda: fetch_search(name, limit, sort, "topics", forum, None, timeout, no_cache),
     )
+    posts = filter_posts(posts, min_likes, by_likes)
     emit(
         {"topic": name, "posts": [post_to_dict(p) for p in posts]},
-        render_post_list(f"Dcard 話題「{name}」 · {sort}", posts), output, json_output, pretty,
+        render_post_list(f"Dcard 話題「{name}」 · {sort}", posts, compact=compact), output, json_output, pretty,
     )
 
 
@@ -445,15 +560,16 @@ def dcard_topic(name, hot, forum, limit, output, json_output, pretty, timeout, n
     "--limit", "-l", type=int, default=100, show_default=True, help="Max posts (0 = all, 100 per credit)"
 )
 @click.option("--info", is_flag=True, help="Also fetch forum info (1 extra credit)")
+@list_options
 @common_options
-def dcard_forum(alias, popular, limit, info, output, json_output, pretty, timeout, no_cache):
+def dcard_forum(alias, popular, limit, info, compact, min_likes, by_likes, output, json_output, pretty, timeout, no_cache):
     """List posts in a forum (latest by default).
 
     \b
     Examples:
         fcrawl dcard forum military
         fcrawl dcard forum military --popular
-        fcrawl dcard forum military --limit 300 --json
+        fcrawl dcard forum military --limit 300 --compact --min-likes 10
     """
     pretty = resolve_pretty(pretty)
 
@@ -462,8 +578,9 @@ def dcard_forum(alias, popular, limit, info, output, json_output, pretty, timeou
         return meta, fetch_forum_posts(alias, limit, popular, timeout, no_cache)
 
     meta, posts = run(f"Fetching Dcard forum {alias}...", work)
+    posts = filter_posts(posts, min_likes, by_likes)
     title = f"Dcard 看板 {alias} · {'熱門' if popular else '最新'}"
-    text = render_post_list(title, posts)
+    text = render_post_list(title, posts, compact=compact)
     if meta:
         f = forum_to_dict(meta)
         text = f"{f['name']}（{alias}）· 訂閱 {f['subscribers']} · 近 30 天 {f['posts_30d']} 篇\n{f['description'] or ''}\n\n" + text
