@@ -33,7 +33,11 @@ fcrawl/
 | `dev <query>` | Code search: GitHub issues, PRs, READMEs, docs (Firecrawl Developer Index) |
 | `csearch <query>` | Multi-engine browser search (Google/Bing/Brave via Camoufox) |
 | `gsearch <query>` | Direct Google browser search via Camoufox |
-| `dcard post <url_or_id>` | Dcard post + comments via Dcard's JSON API (through Firecrawl) |
+| `dcard post <url_or_id>` | Dcard post + comments (v3, `--sort`, `--replies N` expands sub-replies 1 credit each) |
+| `dcard search <query>` | Dcard v3 search: `--forum`, `--sort relevance\|latest\|trending\|interaction`, `--field`, `--since N` days; 30 per credit |
+| `dcard topic <name>` | Posts tagged with a topic (`--hot`); it is search with `field=topics` |
+| `dcard forum <alias>` | Forum post list, latest or `--popular`; 100 per credit; `--info` adds forum stats |
+| `dcard forums` | All forums sorted by subscribers (`-s` filter, `--school`); one cached request |
 | `cache stats\|clean\|clear` | Inspect the /tmp/fcrawl-cache store; `clean --yes` trashes junk (challenge pages, 4xx, empty) |
 | `config` | View current configuration (keys masked) |
 
