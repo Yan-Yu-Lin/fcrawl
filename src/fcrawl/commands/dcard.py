@@ -130,9 +130,14 @@ def fetch_search(
     posts: list = []
     related: list = []
     next_key = None
+    # nextKey is an offset, not a snapshot: mixing a cached page with a live
+    # later page can repeat or skip posts, so multi-page searches skip cache.
+    multi_page = limit == 0 or limit > SEARCH_PAGE
     while limit == 0 or len(posts) < limit:
         page_params = dict(params, nextKey=next_key) if next_key else params
-        page = fetch_json(f"{API3}/search/posts?{urlencode(page_params)}", timeout, no_cache)
+        page = fetch_json(
+            f"{API3}/search/posts?{urlencode(page_params)}", timeout, no_cache or multi_page
+        )
         found = 0
         for item in page.get("items") or []:
             if "searchPost" in item:
@@ -183,6 +188,7 @@ def post_to_dict(post: dict) -> dict:
         "updated_at": post.get("updatedAt"),
         "likes": post.get("likeCount"),
         "comment_count": post.get("commentCount"),
+        "total_comment_count": post.get("totalCommentCount"),
         "topics": post.get("topics") or [],
         "excerpt": post.get("excerpt"),
         "content": post.get("content"),
@@ -266,7 +272,10 @@ def render_post_list(title: str, posts: list, related: Optional[list] = None) ->
     lines = [f"# {title}", "", f"{len(posts)} 篇", ""]
     for raw in posts:
         p = post_to_dict(raw)
-        lines.append(f"- **{p['title']}**  [{p['forum']}] 讚 {p['likes']} 留言 {p['comment_count']} · {(p['created_at'] or '')[:10]}")
+        comments = f"留言 {p['comment_count']}"
+        if p["total_comment_count"] and p["total_comment_count"] != p["comment_count"]:
+            comments += f" (含回覆 {p['total_comment_count']})"
+        lines.append(f"- **{p['title']}**  [{p['forum']}] 讚 {p['likes']} {comments} · {(p['created_at'] or '')[:10]}")
         lines.append(f"  {p['url']}")
         if p["excerpt"]:
             lines.append(f"  {p['excerpt'][:160]}")
@@ -335,7 +344,7 @@ def dcard():
 )
 @click.option(
     "--replies", type=int, default=0, show_default=True,
-    help="Expand sub-replies for up to N comments that have them (1 credit each)",
+    help="Expand sub-replies for up to N comments that have them (1 credit per 30 replies in each)",
 )
 @click.option("--no-comments", is_flag=True, help="Fetch only the post")
 @common_options
@@ -345,7 +354,7 @@ def dcard_post(url_or_id, limit, sort, replies, no_comments, output, json_output
     \b
     Examples:
         fcrawl dcard post https://www.dcard.tw/f/military/p/261218190
-        fcrawl dcard post 261218190 --limit 0 --replies 10   # all comments, expand 10 threads
+        fcrawl dcard post 261218190 --limit 0 --replies 10   # all comments, expand 10 reply threads
         fcrawl dcard post 261218190 --sort likes --json
     """
     pretty = resolve_pretty(pretty)
@@ -478,7 +487,7 @@ def dcard_forums(school, needle, limit, output, json_output, pretty, timeout, no
         rows = [r for r in rows if not r["school"]]
     if needle:
         n = needle.lower()
-        rows = [r for r in rows if n in (r["alias"] or "").lower() or n in (r["name"] or "")]
+        rows = [r for r in rows if n in (r["alias"] or "").lower() or n in (r["name"] or "").lower()]
     rows.sort(key=lambda r: r["subscribers"] or 0, reverse=True)
     if limit:
         rows = rows[:limit]
