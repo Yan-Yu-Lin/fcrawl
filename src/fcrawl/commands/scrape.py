@@ -133,15 +133,17 @@ def scrape_with_gateway(
     from firecrawl.v2.utils.error_handler import handle_response_error
     from firecrawl.v2.utils.normalize import normalize_document_input
 
-    client = get_firecrawl_client()
+    # Firecrawl (the facade) wraps the v2 client; its HttpClient builds the
+    # exact URL/headers the SDK would send.
+    http = get_firecrawl_client()._v2_client.http_client
     options = ScrapeOptions(timeout=timeout * 1000, **scrape_options)
     payload = _prepare_scrape_request(url, options)
-    headers = client.http_client._prepare_headers()
+    headers = http._prepare_headers()
     if not allow_jina:
         headers["X-No-Jina"] = "1"
     if no_cache:
         headers["X-No-Cache"] = "1"
-    response = client.http_client.post("/v2/scrape", payload, headers=headers, timeout=timeout + 15)
+    response = http.post("/v2/scrape", payload, headers=headers, timeout=timeout + 15)
     if not response.ok:
         handle_response_error(response, "scrape")
     body = response.json()
