@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from ..vendors.twscrape import API, AccountsPool
+from twscrape import API, AccountsPool
 
 
 def get_x_config_dir() -> Path:
@@ -29,7 +29,9 @@ def get_x_api(raise_when_no_account: bool = True) -> API:
         Configured API instance pointing to the fcrawl accounts database.
     """
     db_path = get_x_db_path()
-    return API(pool=db_path, raise_when_no_account=raise_when_no_account)
+    # wait_timeout: a second parallel fcrawl process may hold the lease for a
+    # few seconds; waiting briefly beats failing with all_in_use.
+    return API(pool=db_path, raise_when_no_account=raise_when_no_account, wait_timeout=20, wait_interval=1.0)
 
 
 def get_x_pool() -> AccountsPool:

@@ -10,12 +10,20 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from ..utils.cache import cache_key, read_cache, write_cache
-from ..utils.config import load_config
+from ..utils.config import gateway_url, is_gateway, load_config
 from ..utils.output import console, handle_output, resolve_pretty
 
 
 SERPER_ENDPOINT = "https://google.serper.dev/search"
 SERPER_MAX_RESULTS_PER_PAGE = 100
+
+
+def serper_target() -> tuple[str, str]:
+    """(endpoint, api key). In gateway mode Serper is proxied at /gw/search with the family token."""
+    config = load_config()
+    if is_gateway(config):
+        return f"{gateway_url(config)}/gw/search", str(config["gateway_token"])
+    return SERPER_ENDPOINT, _get_serper_api_key()
 
 
 def _get_serper_api_key() -> str:
@@ -62,6 +70,7 @@ def _serper_search(
     extras contains knowledgeGraph, peopleAlsoAsk, relatedSearches from page 1.
     """
     gl, hl = _parse_locale(locale)
+    endpoint, _ = serper_target()  # api_key already came from serper_target()
     headers = {
         "X-API-KEY": api_key,
         "Content-Type": "application/json",
@@ -88,7 +97,7 @@ def _serper_search(
                 payload["location"] = location
 
             response = requests.post(
-                SERPER_ENDPOINT,
+                endpoint,
                 headers=headers,
                 json=payload,
                 timeout=30,
@@ -97,10 +106,17 @@ def _serper_search(
 
             if response.status_code != 200:
                 elapsed = time.time() - start
+                detail = response.text[:120]
+                try:
+                    detail = response.json().get("error") or detail  # gateway: "<code>: <why>"
+                except ValueError:
+                    pass
+                if response.status_code == 429 and response.headers.get("Retry-After"):
+                    detail += f" (retry after {response.headers['Retry-After']}s)"
                 return (
                     [],
                     elapsed,
-                    f"API error: {response.status_code} - {response.text[:120]}",
+                    f"API error: {response.status_code} - {detail}",
                     requests_made,
                     gl,
                     hl,
@@ -278,7 +294,7 @@ def search(
         raise click.Abort()
 
     if not from_cache:
-        api_key = _get_serper_api_key()
+        _, api_key = serper_target()
         if not api_key:
             console.print("[red]SERPER_API_KEY environment variable not set.[/red]")
             console.print("Get your API key at: [cyan]https://serper.dev[/cyan]")

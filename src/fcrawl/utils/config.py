@@ -23,6 +23,10 @@ DEFAULT_CONFIG = {
     "rate_limit_per_minute": 10,  # Firecrawl Free tier /scrape budget per account
     "max_wait": 75,  # seconds to wait when every key is rate limited
     "jina_fallback": True,
+    # Family gateway (fcrawl-gateway). When set, api_url points at the gateway
+    # and this token replaces every real key: Firecrawl, Serper and X all go
+    # through the gateway, which holds the keys, the key pool and the cache.
+    "gateway_token": None,
     "serper_api_key": None,
     "twitterapi_io_key": None,
     "default_format": "markdown",
@@ -76,8 +80,42 @@ def load_config() -> Dict[str, Any]:
     # twitterapi.io (alternative X/Twitter backend for `fcrawl x` commands)
     if os.getenv("TWITTERAPI_IO_KEY"):
         config["twitterapi_io_key"] = os.getenv("TWITTERAPI_IO_KEY")
+    if os.getenv("FCRAWL_GATEWAY_TOKEN"):
+        config["gateway_token"] = os.getenv("FCRAWL_GATEWAY_TOKEN")
 
     return config
+
+
+def is_gateway(config: Optional[Dict[str, Any]] = None) -> bool:
+    """True when fcrawl talks to a family gateway instead of Firecrawl directly."""
+    config = config or load_config()
+    return bool(config.get("gateway_token"))
+
+
+def gateway_url(config: Optional[Dict[str, Any]] = None) -> str:
+    config = config or load_config()
+    return str(config["api_url"]).rstrip("/")
+
+
+def gateway_headers(config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    config = config or load_config()
+    return {"Authorization": f"Bearer {config['gateway_token']}", "Content-Type": "application/json"}
+
+
+def gateway_error_message(exc: Exception) -> str:
+    """A gateway error, readable: strips the SDK's 'Failed to scrape.' wrapping.
+
+    The gateway answers {"error": "<code>: <why>"}; the SDK wraps that into a
+    longer sentence. Return the gateway's own line when we can find it.
+    """
+    text = str(exc)
+    for code in ("personal_quota", "family_quota", "pool_busy", "pool_exhausted", "token_busy",
+                 "blocked_by_target", "upstream_error", "bad_token", "x_unavailable", "not_supported"):
+        idx = text.find(code + ":")
+        if idx >= 0:
+            end = text.find(" - ", idx)
+            return text[idx:end if end > 0 else None]
+    return text
 
 
 def get_twitterapi_io_key() -> str:
@@ -126,7 +164,7 @@ def get_firecrawl_client(api_key: Optional[str] = None) -> "Firecrawl":
 
     config = load_config()
 
-    api_key = api_key or config.get("api_key")
+    api_key = api_key or config.get("gateway_token") or config.get("api_key")
     # For local instances, use a dummy API key if none is set
     if not api_key and is_self_hosted(config["api_url"]):
         api_key = "local-dummy-key"
@@ -171,7 +209,14 @@ def firecrawl_call(fn, max_wait: Optional[int] = None):
     fn must be a single request. Multi-step SDK calls (crawl/extract, which
     start a job and then poll it) should pool only the job start, see
     firecrawl_job().
+
+    Gateway mode skips the pool entirely: the gateway runs the pool and
+    answers quota problems with 429 + Retry-After, never 402, so the local
+    pool's "disable on 402" rule must not see those responses.
     """
+    config = load_config()
+    if is_gateway(config):
+        return fn(get_firecrawl_client(config["gateway_token"]))
     pool = get_key_pool(max_wait)
     return pool.call(lambda key: fn(get_firecrawl_client(key)))
 
@@ -183,6 +228,12 @@ def firecrawl_job(start, wait, max_wait: Optional[int] = None):
     Polling never switches key: a 429 on a status check must not create a
     second job on another account.
     """
+    config = load_config()
+    if is_gateway(config):
+        # the gateway answers 501 for crawl/extract; let that error surface as is
+        client = get_firecrawl_client(config["gateway_token"])
+        job = start(client)
+        return wait(client, job.id)
     pool = get_key_pool(max_wait)
     holder: dict = {}
 

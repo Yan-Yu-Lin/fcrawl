@@ -9,16 +9,14 @@ dependencies = [
     "beautifulsoup4>=4.14.3",
     "camoufox[geoip]>=0.4.11",
     "click>=8.3.1",
-    "fake-useragent>=2.0.0",
-    "firecrawl-py @ file:///Users/linyanyu/20-29-Development/23-tools/23.02-external-tools/firecrawl/apps/python-sdk",
+    "firecrawl-py",
     "httpx>=0.28.1",
-    "loguru>=0.7.3",
     "orjson>=3.11.5",
-    "pyotp>=2.9.0",
     "pyperclip>=1.11.0",
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",
     "rich>=14.2.0",
+    "twscrape",
     "yt-dlp>=2025.12.8",
 ]
 
@@ -43,6 +41,12 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fcrawl"]
+
+[tool.uv.sources]
+# Arthur's firecrawl fork: SDK with DocumentMetadata extra fields (gateway gw* metadata rides on them).
+firecrawl-py = { git = "https://github.com/Yan-Yu-Lin/firecrawl.git", rev = "3c3212971830bc02dec4b89fe261de1c89c25383", subdirectory = "apps/python-sdk" }
+# Arthur's twscrape fork (branch fcrawl): upstream main + structured error causes + opt-in telemetry.
+twscrape = { git = "https://github.com/Yan-Yu-Lin/twscrape.git", rev = "90565f766078235436be52dcd3e045ef65648e00" }
 
 [tool.uv]
 # Override old deps to get Python 3.13 compatible versions

@@ -23,7 +23,7 @@ import email.utils
 from datetime import datetime, timezone
 from typing import Any
 
-from ..twscrape.models import (
+from twscrape.models import (
     Media,
     MediaAnimated,
     MediaPhoto,

@@ -11,21 +11,24 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
+from twscrape import NoAccountError, Tweet, User
+from twscrape.models import parse_tweet
+
 from ..utils.article_parser import parse_article_from_response
+from ..utils.config import is_gateway
 from ..utils.output import handle_output, save_to_file
 from ..utils.x_client import get_x_api, get_x_db_path, get_x_pool
-from ..vendors.twscrape import NoAccountError, Tweet, User
-from ..vendors.twscrape.models import parse_tweet
 from ._x_diagnose import render_diagnostics, run_diagnostics
+from . import _x_gateway as gateway_backend
 from . import _x_twitterapi as twitterapi_backend
 
 console = Console()
 
 # Choices shared by every x subcommand that supports backend switching.
-# Default stays 'twscrape' to preserve existing behavior for users without
-# a twitterapi.io API key.
-PROVIDER_CHOICES = ['twscrape', 'twitterapi']
-PROVIDER_DEFAULT = 'twscrape'
+# 'twscrape' (local cookies) stays the default, unless .fcrawlrc has a
+# gateway_token: then the family gateway holds the cookies and is the default.
+PROVIDER_CHOICES = ['twscrape', 'twitterapi', 'gateway']
+PROVIDER_DEFAULT = 'gateway' if is_gateway() else 'twscrape'
 
 
 def _format_unlock(dt) -> str:
@@ -309,7 +312,7 @@ def x_diagnose():
 @click.option('--sort', type=click.Choice(['top', 'latest', 'photos', 'videos']), default='top',
               help='Sort order (default: top)')
 @click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
-              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
+              help='Backend: twscrape (local cookies), twitterapi (paid), gateway (family gateway; default when gateway_token is set).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def x_search(query: str, limit: int, sort: str, provider: str, output: Optional[str], json_output: bool):
@@ -325,14 +328,15 @@ def x_search(query: str, limit: int, sort: str, provider: str, output: Optional[
     # twitterapi backend: short-circuit to the helper module. The twitterapi
     # backend does its own API-key check + error translation; sort option is
     # mapped inside fetch_search() so we don't need product mapping here.
-    if provider == 'twitterapi':
+    if provider in ('twitterapi', 'gateway'):
+        backend = twitterapi_backend if provider == 'twitterapi' else gateway_backend
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
-            progress.add_task(f"Searching for '{query}' (twitterapi.io)...", total=None)
-            tweets = twitterapi_backend.fetch_search(query, limit=limit, sort=sort)
+            progress.add_task(f"Searching for '{query}' ({provider})...", total=None)
+            tweets = backend.fetch_search(query, limit=limit, sort=sort)
             progress.stop()
 
         if not tweets:
@@ -416,7 +420,7 @@ def x_search(query: str, limit: int, sort: str, provider: str, output: Optional[
 @click.option('--with-replies', is_flag=True, help='Include replies from other users (use with --thread)')
 @click.option('--reply-limit', type=int, default=30, help='Max replies to fetch (default: 30)')
 @click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
-              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
+              help='Backend: twscrape (local cookies), twitterapi (paid), gateway (family gateway; default when gateway_token is set).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, provider: str, output: Optional[str], json_output: bool):
@@ -439,36 +443,45 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
     # twitterapi backend: short-circuit to the helper module and return. The
     # twitterapi path doesn't support the article-parsing that twscrape does,
     # so we omit that block when using this provider.
-    if provider == 'twitterapi':
+    if provider in ('twitterapi', 'gateway'):
         # Validate flag combo (same rule as twscrape path).
         if with_replies and not thread:
             console.print("[yellow]--with-replies requires --thread flag[/yellow]")
             with_replies = False
 
+        article = None
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
             desc = (
-                f"Fetching thread + replies {tweet_id} (twitterapi.io)..."
+                f"Fetching thread + replies {tweet_id} ({provider})..."
                 if with_replies
-                else f"Fetching thread {tweet_id} (twitterapi.io)..."
+                else f"Fetching thread {tweet_id} ({provider})..."
                 if thread
-                else f"Fetching tweet {tweet_id} (twitterapi.io)..."
+                else f"Fetching tweet {tweet_id} ({provider})..."
             )
             progress.add_task(desc, total=None)
 
             if thread:
-                tweets, replies = twitterapi_backend.fetch_thread_and_replies(
-                    tweet_id, with_replies=with_replies, reply_limit=reply_limit
-                )
+                if provider == 'gateway':
+                    tweets, replies, article = gateway_backend.fetch_thread_and_replies(
+                        tweet_id, with_replies=with_replies, reply_limit=reply_limit
+                    )
+                else:
+                    tweets, replies = twitterapi_backend.fetch_thread_and_replies(
+                        tweet_id, with_replies=with_replies, reply_limit=reply_limit
+                    )
                 if not tweets:
                     progress.stop()
                     console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
                     return
             else:
-                single = twitterapi_backend.fetch_tweet(tweet_id)
+                if provider == 'gateway':
+                    single, article = gateway_backend.fetch_tweet(tweet_id)
+                else:
+                    single = twitterapi_backend.fetch_tweet(tweet_id)
                 if not single:
                     progress.stop()
                     console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
@@ -489,10 +502,16 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
                     "thread": [tweet_to_dict(t) for t in tweets],
                     "replies": [tweet_to_dict(t) for t in replies],
                 }
+                if article:
+                    data["article"] = article.to_dict()
             elif thread:
                 data = [tweet_to_dict(t) for t in tweets]
+                if article:
+                    data = {"thread": data, "article": article.to_dict()}
             else:
                 data = tweet_to_dict(tweets[0])
+                if article:
+                    data = {"tweet": data, "article": article.to_dict()}
             if output:
                 save_to_file(json.dumps(data, indent=2), output, 'json')
             if json_output and not output:
@@ -504,6 +523,8 @@ def x_tweet(id_or_url: str, thread: bool, with_replies: bool, reply_limit: int, 
                 console.print(
                     f"\n[dim]Thread: {len(tweets)} tweets from @{tweets[0].user.username}[/dim]"
                 )
+            if article:
+                display_article(article)
             if replies:
                 console.print("\n" + "─" * 60)
                 console.print(
@@ -768,7 +789,7 @@ def x_article(id_or_url: str, output: Optional[str], json_output: bool, raw: boo
 
     async def _fetch():
         api = get_x_api()
-        return await api.tweet_with_article_raw(tweet_id)
+        return await api.tweet_details_raw(tweet_id)  # already asks for article content
 
     with Progress(
         SpinnerColumn(),
@@ -778,24 +799,28 @@ def x_article(id_or_url: str, output: Optional[str], json_output: bool, raw: boo
         task = progress.add_task(f"Fetching article from tweet {tweet_id}...", total=None)
 
         try:
-            rep = asyncio.run(_fetch())
+            if is_gateway():
+                _, article = gateway_backend.fetch_tweet(tweet_id)
+                response_json = None
+            else:
+                rep = asyncio.run(_fetch())
+                response_json = rep.json() if rep else None
+                article = parse_article_from_response(response_json) if response_json else None
             progress.stop()
         except NoAccountError as e:
             progress.stop()
             _handle_no_account_error(e)
             raise click.Abort()
+        except click.Abort:
+            raise
         except Exception as e:
             progress.stop()
             console.print(f"[red]Error: {e}[/red]")
             raise click.Abort()
 
-    if not rep:
+    if not is_gateway() and not response_json:
         console.print(f"[yellow]Tweet {tweet_id} not found[/yellow]")
         return
-
-    # Parse article from response
-    response_json = rep.json()
-    article = parse_article_from_response(response_json)
 
     if not article:
         console.print(f"[yellow]No article found in tweet {tweet_id}[/yellow]")
@@ -837,7 +862,7 @@ def x_article(id_or_url: str, output: Optional[str], json_output: bool, raw: boo
 @x.command(name='user')
 @click.argument('handle')
 @click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
-              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
+              help='Backend: twscrape (local cookies), twitterapi (paid), gateway (family gateway; default when gateway_token is set).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def x_user(handle: str, provider: str, output: Optional[str], json_output: bool):
@@ -853,14 +878,15 @@ def x_user(handle: str, provider: str, output: Optional[str], json_output: bool)
     handle = handle.lstrip('@')
 
     # twitterapi backend: short-circuit to the helper module.
-    if provider == 'twitterapi':
+    if provider in ('twitterapi', 'gateway'):
+        backend = twitterapi_backend if provider == 'twitterapi' else gateway_backend
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
-            progress.add_task(f"Fetching user @{handle} (twitterapi.io)...", total=None)
-            user = twitterapi_backend.fetch_user(handle)
+            progress.add_task(f"Fetching user @{handle} ({provider})...", total=None)
+            user = backend.fetch_user(handle)
             progress.stop()
 
         if not user:
@@ -919,7 +945,7 @@ def x_user(handle: str, provider: str, output: Optional[str], json_output: bool)
 @click.argument('handle')
 @click.option('--limit', '-l', type=int, default=20, help='Maximum number of tweets')
 @click.option('--provider', type=click.Choice(PROVIDER_CHOICES), default=PROVIDER_DEFAULT,
-              help='Backend to use: twscrape (cookie-based, free) or twitterapi (paid, stable).')
+              help='Backend: twscrape (local cookies), twitterapi (paid), gateway (family gateway; default when gateway_token is set).')
 @click.option('-o', '--output', help='Save output to file')
 @click.option('--json', 'json_output', is_flag=True, help='Output as JSON')
 def x_tweets(handle: str, limit: int, provider: str, output: Optional[str], json_output: bool):
@@ -935,14 +961,15 @@ def x_tweets(handle: str, limit: int, provider: str, output: Optional[str], json
     handle = handle.lstrip('@')
 
     # twitterapi backend: short-circuit to the helper module.
-    if provider == 'twitterapi':
+    if provider in ('twitterapi', 'gateway'):
+        backend = twitterapi_backend if provider == 'twitterapi' else gateway_backend
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             console=console
         ) as progress:
-            progress.add_task(f"Fetching tweets from @{handle} (twitterapi.io)...", total=None)
-            user, tweets = twitterapi_backend.fetch_user_tweets(handle, limit=limit)
+            progress.add_task(f"Fetching tweets from @{handle} ({provider})...", total=None)
+            user, tweets = backend.fetch_user_tweets(handle, limit=limit)
             progress.stop()
 
         if user is None:
@@ -1224,12 +1251,14 @@ def x_accounts_add_tokens(ct0: str, auth_token: str, username: Optional[str]):
 
     async def _add():
         pool = get_x_pool()
-        return await pool.add_account_from_tokens(username, ct0, auth_token)
+        # upstream twscrape: inserts, or refreshes the cookies of an existing name
+        await pool.add_account_cookies(username, f"ct0={ct0}; auth_token={auth_token}")
+        return True
 
     try:
         success = asyncio.run(_add())
         if success:
-            console.print(f"[green]Account '{username}' added successfully[/green]")
+            console.print(f"[green]Account '{username}' added (or its cookies refreshed)[/green]")
             console.print("  Status: active, logged_in")
         else:
             console.print(f"[yellow]Account '{username}' already exists[/yellow]")

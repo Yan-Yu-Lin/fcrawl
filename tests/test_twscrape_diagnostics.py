@@ -6,9 +6,9 @@ import httpx
 import pytest
 
 from fcrawl.commands._x_diagnose import check_xclid
-from fcrawl.vendors.twscrape.accounts_pool import AccountsPool, NoAccountError
-from fcrawl.vendors.twscrape.queue_client import classify_error, response_body_snippet
-from fcrawl.vendors.twscrape.utils import utc
+from twscrape.accounts_pool import AccountsPool, NoAccountError
+from twscrape.queue_client import response_body_snippet
+from twscrape.utils import utc
 
 
 def run(coro):
@@ -28,7 +28,7 @@ def test_no_account_error_distinguishes_empty_pool(tmp_path):
 def test_no_account_error_distinguishes_unknown_locks(tmp_path):
     async def scenario():
         pool = AccountsPool(db_file=str(tmp_path / "accounts.db"), raise_when_no_account=True)
-        await pool.add_account_from_tokens("one", "ct0", "auth")
+        await pool.add_account_cookies("one", "ct0=ct0; auth_token=auth")
         await pool.lock_until(
             "one",
             "TweetDetail",
@@ -56,7 +56,7 @@ def test_no_account_error_distinguishes_unknown_locks(tmp_path):
 def test_no_account_error_distinguishes_rate_limited_accounts(tmp_path):
     async def scenario():
         pool = AccountsPool(db_file=str(tmp_path / "accounts.db"), raise_when_no_account=True)
-        await pool.add_account_from_tokens("one", "ct0", "auth")
+        await pool.add_account_cookies("one", "ct0=ct0; auth_token=auth")
         await pool.lock_until(
             "one",
             "SearchTimeline",
@@ -78,7 +78,7 @@ def test_no_account_error_distinguishes_rate_limited_accounts(tmp_path):
 def test_no_account_error_distinguishes_inactive_auth_failures(tmp_path):
     async def scenario():
         pool = AccountsPool(db_file=str(tmp_path / "accounts.db"), raise_when_no_account=True)
-        await pool.add_account_from_tokens("one", "ct0", "auth")
+        await pool.add_account_cookies("one", "ct0=ct0; auth_token=auth")
         await pool.mark_inactive(
             "one",
             "(32) Could not authenticate you",
@@ -96,30 +96,35 @@ def test_no_account_error_distinguishes_inactive_auth_failures(tmp_path):
 
 
 def test_response_body_snippet_compacts_and_limits_body():
-    rep = httpx.Response(
+    from twscrape.http import Response
+
+    rep = Response(httpx.Response(
         403,
         request=httpx.Request("GET", "https://x.com/i/api/graphql/test"),
         text="first\n\nsecond " + ("x" * 600),
-    )
+    ))
     snippet = response_body_snippet(rep)
     assert "\n" not in snippet
     assert snippet.startswith("first second")
     assert len(snippet) == 500
 
 
-def test_classify_error_labels_auth_and_unknown():
-    req = httpx.Request("GET", "https://x.com")
-    assert classify_error(httpx.Response(429, request=req), "OK", 0) == "rate_limit"
-    assert classify_error(httpx.Response(403, request=req), "OK", -1) == "auth_expired"
-    assert (
-        classify_error(
-            httpx.Response(403, request=req),
-            "(326) Authorization: Denied by access control",
-            10,
-        )
-        == "banned"
-    )
-    assert classify_error(httpx.Response(400, request=req), "OK", -1) == "unknown"
+def test_no_account_error_distinguishes_in_use(tmp_path):
+    """Two leased accounts are busy, not broken: the third caller must see all_in_use."""
+
+    async def scenario():
+        pool = AccountsPool(db_file=str(tmp_path / "accounts.db"), raise_when_no_account=True)
+        await pool.add_account_cookies("one", "ct0=a; auth_token=b")
+        await pool.add_account_cookies("two", "ct0=c; auth_token=d")
+        # stale cause from an old failure must not leak into the next lease
+        await pool.lock_until("one", "SearchTimeline", utc.ts() - 1, cause="unknown", error_status=500)
+        assert await pool.get_for_queue("SearchTimeline") is not None
+        assert await pool.get_for_queue("SearchTimeline") is not None
+        with pytest.raises(NoAccountError) as exc:
+            await pool.get_for_queue_or_wait("SearchTimeline")
+        assert exc.value.cause == "all_in_use"
+
+    run(scenario())
 
 
 def test_xclid_diagnose_reports_parser_snippet():

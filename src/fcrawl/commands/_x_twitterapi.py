@@ -27,7 +27,7 @@ from ..vendors.twitterapi_io import (
     to_tweet,
     to_user,
 )
-from ..vendors.twscrape import Tweet, User
+from twscrape import Tweet, User
 
 console = Console()
 

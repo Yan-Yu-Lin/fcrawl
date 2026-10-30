@@ -187,7 +187,9 @@ class RedditClient:
         return config.get("serper_api_key", "") or ""
 
     def _serper_search(self, query: str, limit: int) -> list[dict[str, Any]]:
-        api_key = self._get_serper_api_key()
+        from ..commands.search import serper_target
+
+        endpoint, api_key = serper_target()
         if not api_key:
             raise RuntimeError(
                 "Reddit blocked public .json search and SERPER_API_KEY is not set "
@@ -195,7 +197,7 @@ class RedditClient:
             )
 
         response = self.session.post(
-            SERPER_ENDPOINT,
+            endpoint,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
             json={"q": query, "gl": "us", "hl": "en", "num": min(limit, 100)},
             timeout=30,

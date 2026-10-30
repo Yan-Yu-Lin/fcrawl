@@ -13,7 +13,13 @@ from rich.console import Console
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
-from ..utils.config import get_firecrawl_client, get_key_pool, load_config
+from ..utils.config import (
+    gateway_error_message,
+    get_firecrawl_client,
+    get_key_pool,
+    is_gateway,
+    load_config,
+)
 from ..utils.keypool import KeyPoolExhausted
 from ..utils.output import (
     handle_output,
@@ -95,6 +101,59 @@ class TaggedResult:
         self.metadata = getattr(result, "metadata", None)
         self.source_provider = provider
         self.fallback_url = fallback_url
+
+
+def gateway_meta(result) -> dict:
+    """gw* fields the family gateway puts into metadata (empty when direct)."""
+    md = getattr(result, "metadata", None)
+    if md is None:
+        return {}
+    if isinstance(md, dict):
+        return {k: v for k, v in md.items() if k.startswith("gw")}
+    out = {}
+    for k in ("gwProvider", "gwCached", "gwFetchedAt", "gwCreditsUsed", "gwAccount", "gwQuota"):
+        v = getattr(md, k, None)
+        if v is None and hasattr(md, "extras"):
+            v = (md.extras or {}).get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
+def scrape_with_gateway(
+    url: str, scrape_options: dict, timeout: int, allow_jina: bool, no_cache: bool = False
+) -> TaggedResult:
+    """One request to the family gateway, which runs the pool, validation, Jina and cache.
+
+    Same body the SDK would send (built with its own helpers) plus two gateway
+    headers the SDK has no option for: X-No-Jina and X-No-Cache.
+    """
+    from firecrawl.v2.methods.scrape import _prepare_scrape_request
+    from firecrawl.v2.types import Document, ScrapeOptions
+    from firecrawl.v2.utils.error_handler import handle_response_error
+    from firecrawl.v2.utils.normalize import normalize_document_input
+
+    client = get_firecrawl_client()
+    options = ScrapeOptions(timeout=timeout * 1000, **scrape_options)
+    payload = _prepare_scrape_request(url, options)
+    headers = client.http_client._prepare_headers()
+    if not allow_jina:
+        headers["X-No-Jina"] = "1"
+    if no_cache:
+        headers["X-No-Cache"] = "1"
+    response = client.http_client.post("/v2/scrape", payload, headers=headers, timeout=timeout + 15)
+    if not response.ok:
+        handle_response_error(response, "scrape")
+    body = response.json()
+    if not body.get("success"):
+        raise RuntimeError(body.get("error", "Unknown error occurred"))
+    result = Document(**normalize_document_input(body.get("data", {})))
+    meta = gateway_meta(result)
+    provider = str(meta.get("gwProvider") or "gateway")
+    tagged = TaggedResult(result, provider=provider)
+    if provider == "jina":
+        tagged.fallback_url = f"https://r.jina.ai/{url}"
+    return tagged
 
 
 def sanitize_url_for_path(url: str) -> str:
@@ -220,6 +279,7 @@ def fetch_scrape_result(
     timeout: int,
     allow_jina: bool,
     max_wait: Optional[int] = None,
+    no_cache: bool = False,
 ):
     """Firecrawl first; Jina only as a relay when Firecrawl fails or is blocked.
 
@@ -228,6 +288,20 @@ def fetch_scrape_result(
     them.
     """
     errors = []
+    if is_gateway():
+        # The gateway already tried Firecrawl then Jina and validated both; a
+        # 422 blocked_by_target from it means neither had real content.
+        try:
+            result = scrape_with_gateway(url, scrape_options, timeout, allow_jina, no_cache)
+        except Exception as exc:
+            message = gateway_error_message(exc)
+            if message.startswith("blocked_by_target"):
+                raise BlockedResult(f"Blocked by the target site ({message})") from exc
+            raise RuntimeError(message) from exc
+        ok, reason = validate_result(result)
+        if ok:
+            return result
+        raise BlockedResult(f"Blocked by the target site (gateway: {reason})")
     try:
         result = scrape_with_firecrawl(url, scrape_options, timeout, max_wait)
         ok, reason = validate_result(result)
@@ -326,6 +400,10 @@ def format_with_metadata(result, content: str) -> str:
         header_lines.append(f"Source Provider: {result.source_provider}")
     if hasattr(result, "fallback_url") and result.fallback_url:
         header_lines.append(f"Fallback URL: {result.fallback_url}")
+    gw = gateway_meta(result)
+    if gw.get("gwProvider"):
+        cached = " (gateway cache)" if gw.get("gwCached") else ""
+        header_lines.append(f"Gateway: {gw['gwProvider']}{cached}")
 
     if hasattr(result, "metadata") and result.metadata:
         md = result.metadata
@@ -541,6 +619,7 @@ def scrape(
                     timeout=timeout,
                     allow_jina=allow_jina,
                     max_wait=max_wait,
+                    no_cache=no_cache,
                 )
                 progress.stop()
 
@@ -623,10 +702,12 @@ def scrape(
     )
 
     if save_temp and output_path:
+        gw = gateway_meta(result)
         announce_saved_result(
             path=output_path,
-            provider=getattr(result, "source_provider", "unknown"),
+            provider=str(gw.get("gwProvider") or getattr(result, "source_provider", "unknown")),
             url=url,
             fallback_url=getattr(result, "fallback_url", None),
             from_cache=from_cache,
+            status="gateway_cache" if gw.get("gwCached") and not from_cache else None,
         )

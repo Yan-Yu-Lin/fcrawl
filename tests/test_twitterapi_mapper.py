@@ -17,7 +17,7 @@ import pytest
 from fcrawl.commands.x import display_tweet, display_user, tweet_to_dict, user_to_dict
 from fcrawl.vendors.twitterapi_io import to_tweet, to_user
 from fcrawl.vendors.twitterapi_io.client import MAX_PAGES_UNBOUNDED, _pages_for_limit
-from fcrawl.vendors.twscrape import Tweet, User
+from twscrape import Tweet, User
 
 FIXTURES = Path(__file__).parent / "fixtures" / "twitterapi_io"
 

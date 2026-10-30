@@ -10,10 +10,22 @@ from rich.console import Console
 from rich.table import Table
 
 from ..utils.x_client import get_x_api, get_x_pool
-from ..vendors.twscrape import NoAccountError
-from ..vendors.twscrape.xclid import XClIdGen, get_scripts_debug_snippet, get_scripts_list
+from twscrape import NoAccountError
+from twscrape.xclid import XClIdGen, get_scripts_list
 
 X_HOME_URL = "https://x.com/"
+
+
+def _scripts_debug_snippet(text: str, radius: int = 500) -> str:
+    """Around the first script reference, so a parser failure shows what X now serves."""
+    idx = text.find("/x-web/")
+    if idx < 0:
+        idx = text.find("client-web")
+    if idx < 0:
+        idx = text.find('a.js"')
+    if idx < 0:
+        idx = 0
+    return text[max(0, idx - radius): idx + radius].replace("\n", " ")
 STABLE_TWEET_ID = 20
 
 
@@ -66,7 +78,7 @@ async def check_xclid(
         return {
             "ok": False,
             "error": str(e),
-            "snippet": get_scripts_debug_snippet(html) if html else "",
+            "snippet": _scripts_debug_snippet(html) if html else "",
         }
 
 
