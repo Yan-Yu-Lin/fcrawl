@@ -184,6 +184,7 @@ def fetch_replies(tweet_id: int, limit: int) -> list[Tweet]:
         seen: set[int] = set()
         seen_cursors: set[str] = set()
         cursor = None
+        empty_pages = 0
         while len(out) < limit:
             result = gql("TweetDetail", {"focalTweetId": str(tweet_id), "referrer": "tweet"}, cursor)
             if result.get("provider") == "twitterapi":
@@ -198,7 +199,12 @@ def fetch_replies(tweet_id: int, limit: int) -> list[Tweet]:
                     if len(out) >= limit:
                         return out
             next_cursor = _cursor(page, "ShowMoreThreads")
-            if not next_cursor or added == 0 or next_cursor in seen_cursors:
+            if not next_cursor or next_cursor in seen_cursors:
+                break
+            # a page can hold only nested replies (no direct ones) yet still
+            # continue; like twscrape's _gql_items, tolerate a few in a row
+            empty_pages = empty_pages + 1 if added == 0 else 0
+            if empty_pages >= 3:
                 break
             seen_cursors.add(next_cursor)
             cursor = next_cursor

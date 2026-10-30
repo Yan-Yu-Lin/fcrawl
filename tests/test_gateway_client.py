@@ -141,3 +141,34 @@ def test_11_search_no_cache_sends_header(monkeypatch):
     seen.clear()
     s._serper_search("q", 5, None, None, "fgw_x")
     assert "X-No-Cache" not in seen
+
+
+def test_13_replies_survive_a_filtered_empty_page(monkeypatch):
+    """Page 1 has only nested replies (none to our tweet) but a cursor; page 2 has the match."""
+    calls = []
+
+    def fake_gql(op, variables, cursor=None):
+        calls.append(cursor)
+        if cursor is None:
+            return {"provider": "twscrape", "page": _tweet_page([21], cursor="c1", cursor_type="ShowMoreThreads", reply_to=99)}
+        if cursor == "c1":
+            return {"provider": "twscrape", "page": _tweet_page([22], cursor="c2", cursor_type="ShowMoreThreads", reply_to=1)}
+        return {"provider": "twscrape", "page": _tweet_page([], cursor=None)}
+
+    monkeypatch.setattr(gw, "gql", fake_gql)
+    out = gw.fetch_replies(1, 4)
+    assert [t.id for t in out] == [22]
+    assert calls == [None, "c1", "c2"]
+
+
+def test_13_replies_stop_after_three_empty_pages(monkeypatch):
+    calls = []
+
+    def fake_gql(op, variables, cursor=None):
+        calls.append(cursor)
+        n = len(calls)
+        return {"provider": "twscrape", "page": _tweet_page([100 + n], cursor=f"c{n}", cursor_type="ShowMoreThreads", reply_to=99)}
+
+    monkeypatch.setattr(gw, "gql", fake_gql)
+    assert gw.fetch_replies(1, 4) == []
+    assert len(calls) == 3

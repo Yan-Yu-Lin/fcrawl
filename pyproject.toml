@@ -46,7 +46,7 @@ packages = ["src/fcrawl"]
 # Arthur's firecrawl fork: SDK with DocumentMetadata extra fields (gateway gw* metadata rides on them).
 firecrawl-py = { git = "https://github.com/Yan-Yu-Lin/firecrawl.git", rev = "3c3212971830bc02dec4b89fe261de1c89c25383", subdirectory = "apps/python-sdk" }
 # Arthur's twscrape fork (branch fcrawl): upstream main + structured error causes + opt-in telemetry.
-twscrape = { git = "https://github.com/Yan-Yu-Lin/twscrape.git", rev = "692ff17deeac8587b73b84ffdd2a4386fa4ec9a7" }
+twscrape = { git = "https://github.com/Yan-Yu-Lin/twscrape.git", rev = "66028f5668f174cf93bec7f7243c10536a8a5c88" }
 
 [tool.uv]
 # Override old deps to get Python 3.13 compatible versions
