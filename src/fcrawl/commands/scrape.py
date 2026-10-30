@@ -30,6 +30,7 @@ from ..utils.output import (
 )
 from ..utils.cache import (
     cache_key,
+    metadata_to_dict,
     read_cache,
     write_cache,
     result_to_dict,
@@ -108,16 +109,7 @@ def gateway_meta(result) -> dict:
     md = getattr(result, "metadata", None)
     if md is None:
         return {}
-    if isinstance(md, dict):
-        return {k: v for k, v in md.items() if k.startswith("gw")}
-    out = {}
-    for k in ("gwProvider", "gwCached", "gwFetchedAt", "gwCreditsUsed", "gwAccount", "gwQuota"):
-        v = getattr(md, k, None)
-        if v is None and hasattr(md, "extras"):
-            v = (md.extras or {}).get(k)
-        if v is not None:
-            out[k] = v
-    return out
+    return {k: v for k, v in metadata_to_dict(md).items() if k.startswith("gw")}
 
 
 def scrape_with_gateway(
@@ -143,7 +135,9 @@ def scrape_with_gateway(
         headers["X-No-Jina"] = "1"
     if no_cache:
         headers["X-No-Cache"] = "1"
-    response = http.post("/v2/scrape", payload, headers=headers, timeout=timeout + 15)
+    # the gateway may spend up to timeout+10 s on Firecrawl and then relay to
+    # Jina under the same deadline; give it that plus network slack
+    response = http.post("/v2/scrape", payload, headers=headers, timeout=timeout + 20)
     if not response.ok:
         handle_response_error(response, "scrape")
     body = response.json()
@@ -679,12 +673,7 @@ def scrape(
             md_content = getattr(result, "markdown", "") or ""
             content["links"] = extract_markdown_links(md_content)
         if hasattr(result, "metadata"):
-            metadata = getattr(result, "metadata", None)
-            content["metadata"] = (
-                metadata.__dict__
-                if metadata is not None and hasattr(metadata, "__dict__")
-                else metadata
-            )
+            content["metadata"] = metadata_to_dict(getattr(result, "metadata", None))
         if hasattr(result, "source_provider") and getattr(
             result, "source_provider", None
         ):

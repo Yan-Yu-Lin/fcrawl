@@ -11,6 +11,7 @@ Every function returns the Tweet / User dataclasses x.py already renders.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 import click
@@ -84,29 +85,38 @@ def _run(fn):
 # --- paginated helpers ------------------------------------------------------
 
 
-def _page_tweets(result: dict, limit: int) -> tuple[list[Tweet], str | None]:
+def _page_tweets(result: dict, limit: int, cursor_type: str = "Bottom") -> tuple[list[Tweet], str | None]:
     if result.get("provider") == "twitterapi":
         return [to_tweet(t) for t in result.get("tweets") or []][:limit], result.get("nextCursor")
     page = result["page"]
     tweets = list(parse_tweets(page, limit))
-    return tweets, _bottom_cursor(page)
+    return tweets, _cursor(page, cursor_type)
 
 
-def _bottom_cursor(page: dict) -> str | None:
-    """Bottom cursor of a timeline page, same walk twscrape's _get_cursor does."""
+def _cursor(page: dict, cursor_type: str = "Bottom") -> str | None:
+    """Continuation cursor of a page, same walk twscrape's _get_cursor does.
+
+    Timelines paginate with "Bottom"; TweetDetail (replies) with "ShowMoreThreads".
+    """
     from twscrape.utils import find_obj
 
-    cur = find_obj(page, lambda x: isinstance(x, dict) and x.get("cursorType") == "Bottom")
+    cur = find_obj(page, lambda x: isinstance(x, dict) and x.get("cursorType") == cursor_type)
     return cur.get("value") if cur else None
 
 
-def _collect(op: str, variables: dict[str, Any], limit: int, max_pages: int = 10) -> list[Tweet]:
+def _collect(op: str, variables: dict[str, Any], limit: int, cursor_type: str = "Bottom") -> list[Tweet]:
+    """Page until the limit is met, the cursor runs out, or pagination stalls.
+
+    Same stop rules as twscrape's _gql_items: no fixed page ceiling, but a page
+    that adds nothing new (or repeats a cursor) ends the walk.
+    """
     out: list[Tweet] = []
     seen: set[int] = set()
+    seen_cursors: set[str] = set()
     cursor = None
-    for _ in range(max_pages):
+    while len(out) < limit:
         result = gql(op, variables, cursor)
-        tweets, next_cursor = _page_tweets(result, limit - len(out))
+        tweets, next_cursor = _page_tweets(result, limit - len(out), cursor_type)
         added = 0
         for t in tweets:
             if t.id in seen:
@@ -116,8 +126,9 @@ def _collect(op: str, variables: dict[str, Any], limit: int, max_pages: int = 10
             added += 1
             if len(out) >= limit:
                 return out
-        if not next_cursor or added == 0:
+        if not next_cursor or added == 0 or next_cursor in seen_cursors:
             break
+        seen_cursors.add(next_cursor)
         cursor = next_cursor
     return out
 
@@ -166,11 +177,32 @@ def fetch_tweet(tweet_id: int) -> tuple[Tweet | None, Any]:
 
 
 def fetch_replies(tweet_id: int, limit: int) -> list[Tweet]:
+    """Direct replies to tweet_id, paging TweetDetail with its ShowMoreThreads cursor."""
+
     def go():
-        result = gql("TweetDetail", {"focalTweetId": str(tweet_id), "referrer": "tweet"})
-        if result.get("provider") == "twitterapi":
-            return []  # the fallback has no reply listing in this shape
-        return [t for t in parse_tweets(result["page"]) if t.inReplyToTweetId == tweet_id][:limit]
+        out: list[Tweet] = []
+        seen: set[int] = set()
+        seen_cursors: set[str] = set()
+        cursor = None
+        while len(out) < limit:
+            result = gql("TweetDetail", {"focalTweetId": str(tweet_id), "referrer": "tweet"}, cursor)
+            if result.get("provider") == "twitterapi":
+                return out  # the fallback has no reply listing in this shape
+            page = result["page"]
+            added = 0
+            for t in parse_tweets(page):
+                if t.inReplyToTweetId == tweet_id and t.id not in seen:
+                    seen.add(t.id)
+                    out.append(t)
+                    added += 1
+                    if len(out) >= limit:
+                        return out
+            next_cursor = _cursor(page, "ShowMoreThreads")
+            if not next_cursor or added == 0 or next_cursor in seen_cursors:
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return out
 
     return _run(go)
 
@@ -190,10 +222,12 @@ def fetch_thread_and_replies(tweet_id: int, *, with_replies: bool, reply_limit: 
     others: dict[int, Tweet] = {}
 
     def is_reply_to_others(t: Tweet) -> bool:
+        # same rule as the local backend: a leading @handle that is not the author
         content = t.rawContent.strip()
         if content.startswith("@"):
-            first = content[1:].split()[0] if content[1:].split() else ""
-            return first.lower() != author_username.lower()
+            match = re.match(r"@(\w+)", content)
+            if match:
+                return match.group(1).lower() != author_username.lower()
         return False
 
     def add(t: Tweet) -> None:
@@ -201,8 +235,8 @@ def fetch_thread_and_replies(tweet_id: int, *, with_replies: bool, reply_limit: 
             return
         thread[t.id] = t
 
-    # timeline with replies, same conversation
-    for t in _run(lambda: _collect("UserTweetsAndReplies", {"userId": str(author_id), "count": 40}, 50, max_pages=2)):
+    # timeline with replies, same conversation (50 like the local backend)
+    for t in _run(lambda: _collect("UserTweetsAndReplies", {"userId": str(author_id), "count": 40}, 50)):
         if getattr(t, "conversationId", None) == conv_id:
             add(t)
 

@@ -63,6 +63,7 @@ def _serper_search(
     locale: Optional[str],
     location: Optional[str],
     api_key: str,
+    no_cache: bool = False,
 ) -> tuple[list[dict], float, Optional[str], int, str, str, dict]:
     """Search using Serper with pagination and deduplication.
 
@@ -75,6 +76,8 @@ def _serper_search(
         "X-API-KEY": api_key,
         "Content-Type": "application/json",
     }
+    if no_cache:
+        headers["X-No-Cache"] = "1"  # family gateway: skip its search cache too
 
     start = time.time()
     results: list[dict] = []
@@ -313,6 +316,7 @@ def search(
                 locale=locale,
                 location=location,
                 api_key=api_key,
+                no_cache=no_cache,
             )
 
         if error:

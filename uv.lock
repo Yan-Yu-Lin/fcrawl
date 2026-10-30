@@ -702,7 +702,7 @@ requires-dist = [
     { name = "rich", specifier = ">=14.2.0" },
     { name = "torch", marker = "extra == 'asr'", specifier = ">=2.9.0" },
     { name = "torchaudio", marker = "extra == 'asr'", specifier = ">=2.9.0" },
-    { name = "twscrape", git = "https://github.com/Yan-Yu-Lin/twscrape.git?rev=90565f766078235436be52dcd3e045ef65648e00" },
+    { name = "twscrape", git = "https://github.com/Yan-Yu-Lin/twscrape.git?rev=692ff17deeac8587b73b84ffdd2a4386fa4ec9a7" },
     { name = "yt-dlp", specifier = ">=2025.12.8" },
 ]
 provides-extras = ["asr"]
@@ -2991,7 +2991,7 @@ wheels = [
 [[package]]
 name = "twscrape"
 version = "0.20.1"
-source = { git = "https://github.com/Yan-Yu-Lin/twscrape.git?rev=90565f766078235436be52dcd3e045ef65648e00#90565f766078235436be52dcd3e045ef65648e00" }
+source = { git = "https://github.com/Yan-Yu-Lin/twscrape.git?rev=692ff17deeac8587b73b84ffdd2a4386fa4ec9a7#692ff17deeac8587b73b84ffdd2a4386fa4ec9a7" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "beautifulsoup4" },

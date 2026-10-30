@@ -139,6 +139,21 @@ def iter_cache(command: str) -> Iterator[Tuple[Path, Optional[dict]]]:
             yield path, None
 
 
+def metadata_to_dict(md) -> dict:
+    """Plain dict of a metadata object, including the gateway's extra gw* fields.
+
+    The SDK's DocumentMetadata is a pydantic model with extra="allow": extras
+    live outside __dict__, so model_dump() is the only complete view.
+    """
+    if md is None:
+        return {}
+    if isinstance(md, dict):
+        return dict(md)
+    if hasattr(md, "model_dump"):
+        return md.model_dump(exclude_none=True)
+    return dict(getattr(md, "__dict__", {}))
+
+
 def result_to_dict(result) -> dict:
     """Convert Firecrawl result object to cacheable dict"""
     data = {}
@@ -149,8 +164,7 @@ def result_to_dict(result) -> dict:
     if hasattr(result, "links"):
         data["links"] = result.links
     if hasattr(result, "metadata") and result.metadata:
-        md = result.metadata
-        data["metadata"] = md.__dict__ if hasattr(md, "__dict__") else md
+        data["metadata"] = metadata_to_dict(result.metadata)
     if hasattr(result, "source_provider") and result.source_provider:
         data["source_provider"] = result.source_provider
     if hasattr(result, "fallback_url") and result.fallback_url:

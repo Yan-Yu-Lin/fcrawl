@@ -72,7 +72,13 @@ def fetch_json(url: str, timeout: int, no_cache: bool) -> Any:
         stats["requests"] += 1
         try:
             result = firecrawl_call(
-                lambda client: client.scrape(url, formats=["markdown"], timeout=timeout * 1000)
+                lambda client: client.scrape(
+                    url, formats=["markdown"], timeout=timeout * 1000,
+                    # --no-cache must also skip the gateway's cache; maxAge=0 is
+                    # the Firecrawl-native way to say that (ignored by Firecrawl
+                    # itself for these JSON endpoints, honoured by the gateway)
+                    **({"max_age": 0} if no_cache else {}),
+                )
             )
             break
         except Exception as exc:

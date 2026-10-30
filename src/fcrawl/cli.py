@@ -90,7 +90,7 @@ def config():
     for key, value in config_data.items():
         if key == "api_keys":
             value = [mask_key(k) for k in value]
-        elif key.endswith("_key"):
+        elif key.endswith("_key") or key.endswith("_token"):
             value = mask_key(value)
         console.print(f"  {key}: {value}")
 
