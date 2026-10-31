@@ -11,6 +11,7 @@ from rich.table import Table
 
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import gateway_url, is_gateway, load_config
+from ..utils.goto import goto_label, is_goto, resolve_via_gateway
 from ..utils.output import console, handle_output, resolve_pretty
 
 
@@ -64,11 +65,14 @@ def _serper_search(
     location: Optional[str],
     api_key: str,
     no_cache: bool = False,
+    batches: Optional[int] = None,
 ) -> tuple[list[dict], float, Optional[str], int, str, str, dict]:
     """Search using Serper with pagination and deduplication.
 
     Returns (results, elapsed, error, pages, gl, hl, extras).
     extras contains knowledgeGraph, peopleAlsoAsk, relatedSearches from page 1.
+    `batches` (gateway mode only): how many identical searches the gateway fires
+    and merges; None = the gateway's default for this token.
     """
     gl, hl = _parse_locale(locale)
     endpoint, _ = serper_target()  # api_key already came from serper_target()
@@ -78,6 +82,8 @@ def _serper_search(
     }
     if no_cache:
         headers["X-No-Cache"] = "1"  # family gateway: skip its search cache too
+    if batches is not None:
+        headers["X-Search-Batches"] = str(batches)
 
     start = time.time()
     results: list[dict] = []
@@ -158,6 +164,14 @@ def _serper_search(
                     result_item["date"] = item["date"]
                 if item.get("sitelinks"):
                     result_item["sitelinks"] = item["sitelinks"]
+                if is_goto(url) or item.get("gwGoto"):
+                    # a Google goto ticket: opaque here, the gateway resolves it on use
+                    result_item["goto"] = True
+                if item.get("displayedLink"):
+                    # Google's visible breadcrumb ("https://host › a › b"), untouched by goto
+                    result_item["displayed"] = item["displayedLink"]
+                if item.get("gwBatch"):
+                    result_item["batch"] = item["gwBatch"]
 
                 results.append(result_item)
                 page_added += 1
@@ -206,6 +220,21 @@ def _display_debug_info(
     console.print(table)
 
 
+def shown_url(item: dict) -> str:
+    """The URL line of a result: the real URL, or a [goto #k] marker for a ticket.
+
+    Tickets are valid URLs (fcrawl scrape <ticket> works, the gateway resolves it),
+    but they are long, unique per search and say nothing about the page, so the
+    listing shows a marker; --resolve or --json gives the ticket itself.
+    """
+    if item.get("goto"):
+        if item.get("resolved"):
+            return item["resolved"]
+        return goto_label(item.get("position", 0), displayed=item.get("displayed"),
+                          pending=item.get("goto_pending", False))
+    return item.get("url", "")
+
+
 def _display_results(results: list[dict]):
     """Display search results in pretty mode."""
     console.print("\n[bold]Search Results[/bold]", justify="center")
@@ -213,7 +242,7 @@ def _display_results(results: list[dict]):
 
     for item in results:
         title = item.get("title", "No title")
-        url = item.get("url", "")
+        url = shown_url(item)
         description = item.get("description", "")
 
         console.print(f"[bold cyan]## {title}[/bold cyan]")
@@ -223,6 +252,26 @@ def _display_results(results: list[dict]):
         console.print()
 
     console.print("=" * 60)
+
+
+def resolve_results(results: list[dict], wait: bool = False) -> int:
+    """Ask the gateway for the real URL behind every goto ticket; mark the rest pending.
+    Returns how many were resolved."""
+    tickets = [r["url"] for r in results if r.get("goto") and not r.get("resolved")]
+    if not tickets:
+        return 0
+    answers = resolve_via_gateway(tickets, wait=wait)
+    n = 0
+    for r in results:
+        if not r.get("goto"):
+            continue
+        a = answers.get(r["url"]) or {}
+        if a.get("resolved"):
+            r["resolved"] = a["resolved"]
+            n += 1
+        else:
+            r["goto_pending"] = True
+    return n
 
 
 @click.command()
@@ -254,6 +303,11 @@ def _display_results(results: list[dict]):
 )
 @click.option("--debug", is_flag=True, help="Show search provider stats")
 @click.option("--urls-only", is_flag=True, help="Only output URLs (no titles or snippets)")
+@click.option("--single", is_flag=True, help="Gateway: one Serper search instead of the default two merged batches")
+@click.option("--batches", type=click.IntRange(1, 3), default=None,
+              help="Gateway: number of identical Serper searches to merge (1-3; default: the gateway's)")
+@click.option("--resolve", "resolve_goto", is_flag=True,
+              help="Gateway: ask it for the real URL behind each [goto] ticket after the search")
 def search(
     query: str,
     limit: int,
@@ -266,12 +320,27 @@ def search(
     cache_only: bool,
     debug: bool,
     urls_only: bool,
+    single: bool,
+    batches: Optional[int],
+    resolve_goto: bool,
 ):
-    """Search the web using Serper.dev (Google API)."""
+    """Search the web using Serper.dev (Google API).
+
+    Google wraps most results after the first few in "goto" tickets; they show as
+    [goto #k]. `fcrawl scrape` accepts a ticket directly (the gateway resolves it on
+    use), `--resolve` asks for the real URLs now, `fcrawl resolve` does it later.
+    """
     pretty = resolve_pretty(pretty)
 
     if limit < 1:
         raise click.BadParameter("limit must be >= 1", param_hint="--limit")
+    if single and batches not in (None, 1):
+        raise click.BadParameter("--single means --batches 1", param_hint="--batches")
+    if single:
+        batches = 1
+    if batches is not None and not is_gateway():
+        console.print("[dim]--single/--batches only apply in gateway mode; ignored[/dim]")
+        batches = None
 
     gl, hl = _parse_locale(locale)
     cache_opts = {
@@ -281,6 +350,8 @@ def search(
         "hl": hl,
         "location": location,
     }
+    if batches is not None:
+        cache_opts["batches"] = batches
     key = cache_key(query, cache_opts)
 
     cached_data = None
@@ -317,6 +388,7 @@ def search(
                 location=location,
                 api_key=api_key,
                 no_cache=no_cache,
+                batches=batches,
             )
 
         if error:
@@ -347,7 +419,22 @@ def search(
         console.print("[yellow]No results found[/yellow]")
         return
 
-    console.print(f"[green]Found {len(results)} results[/green]")
+    goto_count = sum(1 for r in results if r.get("goto"))
+    if resolve_goto and goto_count:
+        if not is_gateway():
+            console.print("[yellow]--resolve needs gateway mode; tickets left as they are[/yellow]")
+        else:
+            try:
+                n = resolve_results(results)
+            except RuntimeError as exc:
+                console.print(f"[yellow]resolve failed: {exc}[/yellow]")
+                n = 0
+            console.print(f"[dim]Resolved {n}/{goto_count} goto ticket(s)[/dim]")
+
+    found = f"Found {len(results)} results"
+    if goto_count:
+        found += f" ({goto_count} goto ticket(s): scrape them directly, or use --resolve / fcrawl resolve)"
+    console.print(f"[green]{found}[/green]")
 
     if debug:
         _display_debug_info(
@@ -388,10 +475,11 @@ def search(
     elif not pretty:
         if urls_only:
             for item in results:
-                print(item.get("url", ""))
+                # tickets stay as URLs here: this output feeds scrape, which resolves them
+                print(item.get("resolved") or item.get("url", ""))
         else:
             for item in results:
-                url = item.get("url", "")
+                url = shown_url(item)
                 title = item.get("title", "")
                 desc = item.get("description", "")
                 print(url)
@@ -399,3 +487,5 @@ def search(
                     print(f"  {title}")
                 if desc:
                     print(f"  {desc}")
+                if item.get("goto") and not item.get("resolved"):
+                    print(f"  ticket: {item['url']}")

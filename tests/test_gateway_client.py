@@ -249,3 +249,170 @@ def test_sec14_x_gateway_refuses_with_clear_message(monkeypatch):
     monkeypatch.setattr(requests, "post", no_network)
     with pytest.raises(gw.GatewayXError, match="https://"):
         gw.gql("SearchTimeline", {"rawQuery": "a"})
+
+
+# --- goto tickets (2026-10-31) -------------------------------------------------
+
+
+GOTO = "https://www.google.com/goto?url=CAES"
+
+
+def test_goto_is_goto_and_label():
+    from fcrawl.utils.goto import goto_label, is_goto
+
+    assert is_goto(GOTO + "1") and is_goto("http://google.com.tw/goto?url=1")
+    assert not is_goto("https://www.google.com/search?q=1") and not is_goto("https://google.evil.com/goto?url=1")
+    assert goto_label(4) == "[goto #4]"
+    assert goto_label(4, pending=True) == "[goto #4 pending]"
+    assert goto_label(4, displayed="https://host › a › b...") == "[goto] https://host › a › b..."
+    assert goto_label(4, displayed="https://host › a", pending=True) == "[goto pending] https://host › a"
+
+
+def test_goto_search_marks_tickets_and_sends_batches_header(monkeypatch):
+    from fcrawl.commands import search as s
+
+    seen = {}
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 2, "organic": [
+                {"title": "A", "link": "https://a.example/x", "snippet": "s", "position": 1, "gwBatch": 1, "gwGoto": False},
+                {"title": "B", "link": GOTO + "b", "snippet": "s", "position": 2, "gwBatch": 1, "gwGoto": True,
+                 "displayedLink": "https://b.example › docs › b..."},
+                {"title": "C", "link": GOTO + "c", "snippet": "s", "position": 3, "gwBatch": 2, "gwGoto": True},
+            ]}
+
+    def post(url, headers=None, json=None, timeout=None):
+        seen.update(headers or {})
+        return R()
+
+    monkeypatch.setattr(s.requests, "post", post)
+    monkeypatch.setattr(s, "serper_target", lambda: ("http://gw/gw/search", "fgw_x"))
+    results, *_ = s._serper_search("q", 10, None, None, "fgw_x", batches=1)
+    assert seen["X-Search-Batches"] == "1"
+    assert [r.get("goto") for r in results] == [None, True, True]
+    assert results[1]["displayed"] == "https://b.example › docs › b..." and results[1]["batch"] == 1
+    assert s.shown_url(results[0]) == "https://a.example/x"
+    assert s.shown_url(results[1]) == "[goto] https://b.example › docs › b..."
+    assert s.shown_url(results[2]) == "[goto #3]"
+    results[2]["resolved"] = "https://c.example/real"
+    assert s.shown_url(results[2]) == "https://c.example/real"
+
+
+def test_goto_resolve_results_marks_pending(monkeypatch):
+    from fcrawl.commands import search as s
+
+    results = [{"url": "https://a", "position": 1}, {"url": GOTO + "b", "goto": True, "position": 2},
+               {"url": GOTO + "c", "goto": True, "position": 3}]
+
+    def fake_resolve(urls, wait=False):
+        assert urls == [GOTO + "b", GOTO + "c"] and wait is False
+        return {GOTO + "b": {"resolved": "https://b.real", "status": "ok"}, GOTO + "c": {"resolved": None, "status": "cooldown"}}
+
+    monkeypatch.setattr(s, "resolve_via_gateway", fake_resolve)
+    assert s.resolve_results(results) == 1
+    assert s.shown_url(results[1]) == "https://b.real"
+    assert s.shown_url(results[2]) == "[goto #3 pending]"
+
+
+def test_goto_search_flags(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+
+    rc = tmp_path / ".fcrawlrc"
+    rc.write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    from fcrawl.commands import search as s
+    seen = {}
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 1, "organic": [{"title": "A", "link": GOTO + "a", "snippet": "s", "position": 1,
+                                                 "gwGoto": True, "displayedLink": "https://a.example › p"}]}
+
+    def post(url, headers=None, json=None, timeout=None):
+        seen.update(headers or {})
+        return R()
+
+    monkeypatch.setattr(s.requests, "post", post)
+    out = CliRunner().invoke(cli, ["search", "q", "--single", "--no-cache", "--no-pretty"])
+    assert out.exit_code == 0, out.output
+    assert seen["X-Search-Batches"] == "1"
+    assert "[goto] https://a.example › p" in out.output
+    assert f"ticket: {GOTO}a" in out.output  # the real ticket is still there for scrape
+    out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-cache", "--no-pretty"])
+    assert GOTO + "a" in out.output  # --urls-only keeps tickets as URLs (feeds scrape)
+    out = CliRunner().invoke(cli, ["search", "q", "--single", "--batches", "3"])
+    assert out.exit_code != 0
+
+
+def test_goto_resolve_command(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import resolve as rmod
+
+    rc = tmp_path / ".fcrawlrc"
+    rc.write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    calls = {}
+
+    def fake(urls, wait=False):
+        calls["urls"], calls["wait"] = urls, wait
+        return {GOTO + "a": {"resolved": "https://a.real", "status": "ok"},
+                GOTO + "b": {"resolved": None, "status": "cooldown"}}
+
+    monkeypatch.setattr(rmod, "resolve_via_gateway", fake)
+    out = CliRunner().invoke(cli, ["resolve", GOTO + "a", GOTO + "b", "https://plain", "--wait"])
+    assert out.exit_code == 0, out.output
+    assert calls == {"urls": [GOTO + "a", GOTO + "b"], "wait": True}
+    assert "https://a.real" in out.output and "[goto pending]" in out.output and "not a goto ticket" in out.output
+
+
+def test_goto_scrape_caches_under_real_url(monkeypatch, tmp_path):
+    """A ticket is unique per search: the local cache must be keyed on the resolved URL."""
+    from fcrawl.cli import cli
+    from fcrawl.commands import scrape as sc
+    from fcrawl.utils import cache as cache_mod
+
+    rc = tmp_path / ".fcrawlrc"
+    rc.write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    ticket = GOTO + "zzz"
+    real = "https://real.example/page"
+
+    def fake_gateway(url, scrape_options, timeout, allow_jina, no_cache=False):
+        from firecrawl.v2.types import Document, DocumentMetadata
+        doc = Document(markdown="# hi " + "x" * 900, metadata=DocumentMetadata(
+            title="t", url=real, sourceURL=real, gwProvider="firecrawl", gwResolvedFrom=url))
+        return sc.TaggedResult(doc, provider="firecrawl")
+
+    monkeypatch.setattr(sc, "scrape_with_gateway", fake_gateway)
+    out = CliRunner().invoke(cli, ["scrape", ticket, "--save-temp"])
+    assert out.exit_code == 0, out.output
+    assert "Resolved:" in out.output and real in out.output
+    from fcrawl.utils.cache import cache_key, read_cache
+    opts = {"formats": ["markdown"], "article": False, "raw": False, "include_tags": None, "exclude_tags": None,
+            "wait": None, "timeout": sc.DEFAULT_SCRAPE_TIMEOUT}
+    assert read_cache("scrape", cache_key(real, opts)) is not None
+    assert read_cache("scrape", cache_key(ticket, opts)) is None
+    # scraping the real URL now hits the local cache
+    out = CliRunner().invoke(cli, ["scrape", real, "--save-temp"])
+    assert "Using cached result" in out.output and "from_cache=true" in out.output
+
+
+def test_goto_direct_mode_redeem(monkeypatch):
+    from fcrawl.utils import goto as g
+
+    class R:
+        def __init__(self, status, headers=None, text=""):
+            self.status_code, self.headers, self.text = status, headers or {}, text
+
+    monkeypatch.setattr(g.requests, "get", lambda *a, **k: R(302, {"Location": "https://real/x"}))
+    assert g.direct_redeem(GOTO + "a") == ("https://real/x", None)
+    monkeypatch.setattr(g.requests, "get", lambda *a, **k: R(200, text='<meta http-equiv="refresh" content="19;url=/goto?x">'))
+    assert g.direct_redeem(GOTO + "a") == (None, 19)
+    monkeypatch.setattr(g.requests, "get", lambda *a, **k: R(200, text="<html></html>"))
+    assert g.direct_redeem(GOTO + "a") == (None, None)

@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from .commands.scrape import scrape
+from .commands.resolve import resolve
 from .commands.crawl import crawl
 from .commands.map import map_site
 from .commands.extract import extract
@@ -68,6 +69,7 @@ cli.add_command(crawl)
 cli.add_command(map_site, name="map")
 cli.add_command(extract)
 cli.add_command(search)
+cli.add_command(resolve)
 cli.add_command(dev)
 cli.add_command(gsearch)
 cli.add_command(csearch)

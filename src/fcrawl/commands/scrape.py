@@ -20,6 +20,7 @@ from ..utils.config import (
     is_gateway,
     load_config,
 )
+from ..utils.goto import direct_redeem, is_goto
 from ..utils.keypool import KeyPoolExhausted
 from ..utils.output import (
     handle_output,
@@ -102,6 +103,19 @@ class TaggedResult:
         self.metadata = getattr(result, "metadata", None)
         self.source_provider = provider
         self.fallback_url = fallback_url
+
+
+def real_url_of(result) -> Optional[str]:
+    """The page's real URL as the provider reported it (metadata.url / sourceURL / source_url)."""
+    md = getattr(result, "metadata", None)
+    if md is None:
+        return None
+    data = metadata_to_dict(md)
+    for k in ("url", "sourceURL", "source_url"):
+        v = data.get(k)
+        if isinstance(v, str) and v and not is_goto(v):
+            return v
+    return None
 
 
 def gateway_meta(result) -> dict:
@@ -293,11 +307,23 @@ def fetch_scrape_result(
             message = gateway_error_message(exc)
             if message.startswith("blocked_by_target"):
                 raise BlockedResult(f"Blocked by the target site ({message})") from exc
+            if message.startswith("goto_unresolved"):
+                raise RuntimeError(f"{message}. The Google goto ticket is still cooling down; "
+                                   "retry in ~20 s or run `fcrawl resolve <ticket> --wait`") from exc
             raise RuntimeError(message) from exc
         ok, reason = validate_result(result)
         if ok:
             return result
         raise BlockedResult(f"Blocked by the target site (gateway: {reason})")
+    if is_goto(url):
+        # direct mode: no gateway to resolve for us. One GET from this machine (the
+        # user's own IP, their choice); a 302 gives the real page, otherwise Google's
+        # wait page says how long until the ticket redeems
+        real, wait_s = direct_redeem(url)
+        if real is None:
+            hint = f"try again in {wait_s} s" if wait_s else "it may need a few more seconds"
+            raise RuntimeError(f"goto ticket not redeemable yet from this machine; {hint}")
+        url = real
     try:
         result = scrape_with_firecrawl(url, scrape_options, timeout, max_wait)
         ok, reason = validate_result(result)
@@ -400,6 +426,8 @@ def format_with_metadata(result, content: str) -> str:
     if gw.get("gwProvider"):
         cached = " (gateway cache)" if gw.get("gwCached") else ""
         header_lines.append(f"Gateway: {gw['gwProvider']}{cached}")
+    if gw.get("gwResolvedFrom"):
+        header_lines.append(f"Resolved: {gw['gwResolvedFrom']} → {real_url_of(result) or '?'}")
 
     if hasattr(result, "metadata") and result.metadata:
         md = result.metadata
@@ -619,8 +647,16 @@ def scrape(
                 )
                 progress.stop()
 
-                # Only validated results reach here, so this never caches junk
-                write_cache("scrape", key, result_to_dict(result))
+                # Only validated results reach here, so this never caches junk.
+                # A goto ticket is unique per search, so a result fetched through
+                # one is cached under the real URL it resolved to (the gateway puts
+                # it in metadata); the next ticket for the same page hits locally.
+                real = real_url_of(result) if is_goto(url) else None
+                if real:
+                    console.print(f"[dim]Resolved: {url[:60]}… → {real}[/dim]")
+                    write_cache("scrape", cache_key(real, cache_opts), result_to_dict(result))
+                else:
+                    write_cache("scrape", key, result_to_dict(result))
 
             except BlockedResult as e:
                 progress.stop()
