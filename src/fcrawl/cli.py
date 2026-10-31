@@ -24,7 +24,7 @@ from .commands.x import x
 from .commands.reddit import reddit
 from .commands.cache_cmd import cache
 from .commands.dcard import dcard
-from .utils.config import load_config, mask_key
+from .utils.config import InsecureGatewayURL, check_gateway_url, is_gateway, load_config, mask_key
 
 console = Console()
 
@@ -61,6 +61,14 @@ def cli(ctx):
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
+        return
+    config = load_config()
+    # `config` only shows settings (masked) and sends nothing: keep it usable to fix a bad URL
+    if is_gateway(config) and ctx.invoked_subcommand != "config":
+        try:
+            check_gateway_url(config["api_url"])
+        except InsecureGatewayURL as exc:
+            raise click.ClickException(str(exc)) from None
 
 
 # Register commands

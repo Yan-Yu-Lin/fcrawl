@@ -1,5 +1,6 @@
 """Configuration management for fcrawl"""
 
+import ipaddress
 import os
 import json
 import sys
@@ -92,13 +93,54 @@ def is_gateway(config: Optional[Dict[str, Any]] = None) -> bool:
     return bool(config.get("gateway_token"))
 
 
+class InsecureGatewayURL(RuntimeError):
+    """The gateway token would travel in clear text over the internet."""
+
+
+_PRIVATE_SUFFIXES = (".local", ".lan", ".ts.net")
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _is_private_host(host: str) -> bool:
+    host = host.rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(_PRIVATE_SUFFIXES):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return ip.is_loopback or ip.is_private or ip in _CGNAT
+
+
+def check_gateway_url(api_url: str) -> str:
+    """The gateway URL if it is safe to send the token to, else InsecureGatewayURL.
+
+    https:// always; http:// only to loopback, RFC1918/ULA, 100.64.0.0/10 (tailnet)
+    and .local/.lan/.ts.net names. Anything else would put the Bearer token on the
+    wire in clear text, so refuse before the first byte is sent."""
+    parsed = urlparse(str(api_url))
+    scheme = (parsed.scheme or "").lower()
+    if scheme == "https":
+        return str(api_url).rstrip("/")
+    if scheme == "http" and _is_private_host(parsed.hostname or ""):
+        return str(api_url).rstrip("/")
+    raise InsecureGatewayURL(
+        f"refusing to send the gateway token over {scheme or 'an unknown scheme'}:// to "
+        f"{parsed.hostname or api_url!r}; set api_url to https://… (plain http is only allowed for "
+        "localhost, home LAN and tailnet addresses)"
+    )
+
+
 def gateway_url(config: Optional[Dict[str, Any]] = None) -> str:
     config = config or load_config()
-    return str(config["api_url"]).rstrip("/")
+    return check_gateway_url(config["api_url"])
 
 
 def gateway_headers(config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     config = config or load_config()
+    check_gateway_url(config["api_url"])
     return {"Authorization": f"Bearer {config['gateway_token']}", "Content-Type": "application/json"}
 
 
@@ -164,6 +206,8 @@ def get_firecrawl_client(api_key: Optional[str] = None) -> "Firecrawl":
 
     config = load_config()
 
+    if is_gateway(config) and (api_key is None or api_key == config.get("gateway_token")):
+        check_gateway_url(config["api_url"])  # the family token must not go out over plain http
     api_key = api_key or config.get("gateway_token") or config.get("api_key")
     # For local instances, use a dummy API key if none is set
     if not api_key and is_self_hosted(config["api_url"]):

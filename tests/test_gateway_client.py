@@ -172,3 +172,49 @@ def test_13_replies_stop_after_three_empty_pages(monkeypatch):
     monkeypatch.setattr(gw, "gql", fake_gql)
     assert gw.fetch_replies(1, 4) == []
     assert len(calls) == 3
+
+
+# --- security 2026-10-31 #14: never send the gateway token over plain http to the internet ---
+
+
+@pytest.mark.parametrize("url", [
+    "https://fcrawl.arthurlin.dev", "https://1.2.3.4:8443/", "http://192.168.1.120:3800", "http://10.0.0.5",
+    "http://172.16.3.4:3800", "http://100.64.0.7:3800", "http://127.0.0.1:3800", "http://localhost:3800",
+    "http://[::1]:3800", "http://jason.local:3800", "http://jason.lan", "http://jason.tail1234.ts.net:3800",
+])
+def test_sec14_gateway_url_allowed(url):
+    from fcrawl.utils.config import check_gateway_url
+    assert check_gateway_url(url) == url.rstrip("/")
+
+
+@pytest.mark.parametrize("url", [
+    "http://fcrawl.arthurlin.dev", "http://125.229.144.147:3800", "http://8.8.8.8", "http://example.com.evil",
+    "http://jason.ts.net.evil.com", "ftp://192.168.1.120", "fcrawl.arthurlin.dev",
+])
+def test_sec14_gateway_url_refused(url):
+    from fcrawl.utils.config import InsecureGatewayURL, check_gateway_url
+    with pytest.raises(InsecureGatewayURL, match="https://"):
+        check_gateway_url(url)
+
+
+def test_sec14_cli_refuses_before_any_request(tmp_path, monkeypatch):
+    import requests
+    from fcrawl.cli import cli
+
+    rc = tmp_path / ".fcrawlrc"
+    rc.write_text(json.dumps({"api_url": "http://fcrawl.arthurlin.dev", "gateway_token": "fgw_test_x"}))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
+    monkeypatch.delenv("FCRAWL_GATEWAY_TOKEN", raising=False)
+
+    def no_network(*a, **k):
+        raise AssertionError("a request was attempted")
+
+    monkeypatch.setattr(requests.Session, "request", no_network)
+    result = CliRunner().invoke(cli, ["search", "hello"])
+    assert result.exit_code != 0
+    assert "https://" in result.output and "fgw_test_x" not in result.output
+
+    from fcrawl.utils.config import InsecureGatewayURL, gateway_headers
+    with pytest.raises(InsecureGatewayURL):
+        gateway_headers({"api_url": "http://fcrawl.arthurlin.dev", "gateway_token": "fgw_test_x"})
