@@ -69,6 +69,13 @@ def python_for_hooks() -> str:
     Linux /usr/bin/python3) is preferred over a venv/uv interpreter: hooks run outside
     any project and the gate only needs the standard library. If this process runs on
     a system python already, use that exact path."""
+    if sys.platform == "win32":
+        # No `python3` on Windows. Prefer the py launcher (always on PATH when Python
+        # is installed), then `python`; hooks run under cmd.exe, so return a command
+        # word rather than a path with backslashes to quote.
+        if shutil.which("py"):
+            return "py -3"
+        return shutil.which("python") or "python"
     exe = Path(sys.executable).resolve()
     system_prefixes = ("/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/", "/bin/")
     if str(exe).startswith(system_prefixes) and ".venv" not in str(exe) and "/uv/" not in str(exe):
@@ -79,9 +86,18 @@ def python_for_hooks() -> str:
     return shutil.which("python3") or "python3"
 
 
+def _quote(arg: str) -> str:
+    """Quote for the shell hooks run in: POSIX sh on Unix, cmd.exe on Windows
+    (double quotes only; single quotes are literal there)."""
+    if sys.platform == "win32":
+        return f'"{arg}"' if (" " in arg or "(" in arg) else arg
+    return shlex.quote(arg)
+
+
 def gate_command(gate_path: Path, python: str) -> str:
-    """Shell-quoted, so a config dir with a space ("~/claude config") still runs."""
-    return f"{shlex.quote(python)} {shlex.quote(str(gate_path))}"
+    """Shell-quoted, so a config dir with a space ("~/claude config") still runs.
+    `python` may be a command with flags (`py -3`), so it is not quoted as one word."""
+    return f"{python} {_quote(str(gate_path))}"
 
 
 def hook_script(hook: Any) -> str | None:
@@ -89,10 +105,13 @@ def hook_script(hook: Any) -> str | None:
     if not isinstance(hook, dict) or hook.get("type") != "command" or not isinstance(hook.get("command"), str):
         return None
     try:
-        words = shlex.split(hook["command"])
+        # posix=False keeps Windows backslashes; strip the quotes ourselves.
+        words = shlex.split(hook["command"], posix=(sys.platform != "win32"))
     except ValueError:
         return None
-    return words[-1] if words else None
+    if not words:
+        return None
+    return words[-1].strip('"') if sys.platform == "win32" else words[-1]
 
 
 def is_gate_hook(hook: Any, gate_path: Path) -> bool:
