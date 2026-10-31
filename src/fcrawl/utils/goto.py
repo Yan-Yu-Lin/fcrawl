@@ -95,14 +95,18 @@ def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
             )
         except requests.RequestException as exc:
             raise RuntimeError(f"gateway resolve failed: {type(exc).__name__}: {exc}") from exc
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = None
         if resp.status_code != 200:
-            try:
-                message = resp.json().get("error") or f"gateway HTTP {resp.status_code}"
-            except ValueError:
-                message = f"gateway HTTP {resp.status_code}"
+            message = (payload.get("error") if isinstance(payload, dict) else None) or f"gateway HTTP {resp.status_code}"
             raise RuntimeError(message)
-        for row in resp.json().get("urls") or []:
-            out[row["url"]] = {"resolved": row.get("resolved"), "status": row.get("status", "failed")}
+        if not isinstance(payload, dict) or not isinstance(payload.get("urls"), list):
+            raise RuntimeError("gateway resolve returned an unexpected response")
+        for row in payload["urls"]:
+            if isinstance(row, dict) and isinstance(row.get("url"), str):
+                out[row["url"]] = {"resolved": row.get("resolved"), "status": row.get("status", "failed")}
     return out
 
 

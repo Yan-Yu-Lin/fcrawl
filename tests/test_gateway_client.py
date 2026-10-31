@@ -580,3 +580,31 @@ def test_r2_old_cache_rows_get_goto_marker(monkeypatch, tmp_path):
     out = CliRunner().invoke(cli, ["search", "oldq", "--no-pretty"])
     assert out.exit_code == 0, out.output
     assert "[goto #1]" in out.output and f"ticket: {GOTO}old" in out.output
+
+
+def test_r3_resolve_bad_response_body_is_handled(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(g.requests, "post", lambda *a, **k: R())
+    out = CliRunner().invoke(cli, ["resolve", GOTO + "a"])
+    assert out.exit_code != 0 and "unexpected response" in out.output and "Traceback" not in out.output
+
+    class R2:
+        status_code = 200
+
+        def json(self):
+            return [1, 2]
+
+    monkeypatch.setattr(g.requests, "post", lambda *a, **k: R2())
+    with pytest.raises(RuntimeError):
+        g.resolve_via_gateway([GOTO + "a"])
