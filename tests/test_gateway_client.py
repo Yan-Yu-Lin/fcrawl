@@ -493,3 +493,90 @@ def test_r1_goto_unresolved_message_reaches_user():
 
     exc = Exception("Unexpected error during scrape: Status code 502. goto_unresolved: the Google goto link could not be resolved yet - No additional error details provided.")
     assert gateway_error_message(exc).startswith("goto_unresolved: the Google goto link could not be resolved yet")
+
+
+# --- astra round 2 ---------------------------------------------------------------
+
+
+def test_r2_client_canonical_google_variants():
+    from fcrawl.utils.goto import is_goto
+
+    for u in ("https://www.google.com。/goto?url=1", "https://%67oogle.com/goto?url=1",
+              "https://www.google.com%2e/goto?url=1", "https://ｇoogle.com/goto?url=1"):
+        assert is_goto(u), u
+    assert not is_goto("https://google.bad.com/goto?url=1")
+
+
+def test_r2_resolve_transport_errors_are_handled(monkeypatch, tmp_path):
+    import requests
+    from fcrawl.cli import cli
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+
+    def boom(*a, **k):
+        raise requests.Timeout("slow")
+
+    monkeypatch.setattr(g.requests, "post", boom)
+    out = CliRunner().invoke(cli, ["resolve", GOTO + "a"])
+    assert out.exit_code != 0 and "Timeout" in out.output and "Traceback" not in out.output
+    # search --resolve still shows the results when resolving fails
+    from fcrawl.commands import search as s
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 1, "organic": [{"title": "A", "link": GOTO + "a", "snippet": "s", "position": 1, "gwGoto": True}]}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
+
+    def timeout_resolve(urls, wait=False):
+        raise RuntimeError("gateway resolve failed: Timeout: slow")  # what the helper raises on RequestException
+
+    monkeypatch.setattr(s, "resolve_via_gateway", timeout_resolve)
+    out = CliRunner().invoke(cli, ["search", "q", "--no-cache", "--no-pretty", "--resolve"])
+    assert out.exit_code == 0, out.output
+    assert "resolve failed" in out.output and "[goto #1]" in out.output and "Traceback" not in out.output
+
+
+def test_r2_resolve_dedupes_before_chunking(monkeypatch, tmp_path):
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    sizes = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, urls):
+            self._urls = urls
+
+        def json(self):
+            return {"urls": [{"url": u, "resolved": None, "status": "cooldown"} for u in self._urls]}
+
+    def post(url, json=None, headers=None, timeout=None):
+        sizes.append(len(json["urls"]))
+        return R(json["urls"])
+
+    monkeypatch.setattr(g.requests, "post", post)
+    out = g.resolve_via_gateway([GOTO + "same"] * 7)
+    assert sizes == [1] and len(out) == 1
+
+
+def test_r2_old_cache_rows_get_goto_marker(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.utils import cache as cache_mod
+    from fcrawl.utils.cache import cache_key, write_cache
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    key = cache_key("oldq", {"engine": "serper", "limit": 20, "gl": "us", "hl": "en", "location": None})
+    write_cache("search", key, {"results": [{"title": "T", "url": GOTO + "old", "description": "d", "position": 1}],
+                                "elapsed": 0.1, "engine": "serper", "gl": "us", "hl": "en", "pages": 1, "location": None, "extras": {}})
+    out = CliRunner().invoke(cli, ["search", "oldq", "--no-pretty"])
+    assert out.exit_code == 0, out.output
+    assert "[goto #1]" in out.output and f"ticket: {GOTO}old" in out.output

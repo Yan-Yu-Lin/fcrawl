@@ -410,6 +410,10 @@ def search(
 
     cache_data = cached_data or {}
     results = cache_data.get("results", [])
+    for item in results:
+        # rows cached before goto support carry the ticket but no flag
+        if "goto" not in item and is_goto(item.get("url")):
+            item["goto"] = True
     extras = cache_data.get("extras", {})
     elapsed = float(cache_data.get("elapsed", 0.0))
     pages = int(cache_data.get("pages", 0))

@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
+import idna
 import requests
 
 from .config import gateway_headers, gateway_url, is_gateway, load_config
@@ -28,10 +29,25 @@ MAX_RESOLVE_URLS = 20
 RESOLVE_CHUNK = 6  # tickets per /gw/resolve call: the gateway works 6 at a time
 
 
+def normalize_host(host: Any) -> str:
+    """Canonical host like a URL parser would see it (percent-decoded, UTS-46 mapped,
+    trailing dots dropped, punycode); '' when unusable. Same rule as the gateway."""
+    if not isinstance(host, str) or not host or len(host) > 253:
+        return ""
+    h = unquote(host.strip())
+    if any(ord(c) < 0x21 or c in "/\\?#@[]" for c in h):
+        return ""
+    try:
+        h = idna.uts46_remap(h, std3_rules=False, transitional=False).rstrip(".")
+        return idna.encode(h, uts46=True).decode("ascii") if h else ""
+    except (idna.IDNAError, UnicodeError, ValueError):
+        return ""
+
+
 def is_google_host(host: Any) -> bool:
-    if not isinstance(host, str):
+    h = normalize_host(host)
+    if not h:
         return False
-    h = host.strip().rstrip(".").lower()
     labels = h.split(".")
     return any(GOOGLE_DOMAIN_RE.match(".".join(labels[i:])) for i in range(len(labels)))
 
@@ -43,7 +59,7 @@ def is_goto(url: Any) -> bool:
         p = urlsplit(url)
     except ValueError:
         return False
-    return p.scheme in ("http", "https") and is_google_host(p.hostname) and p.path.rstrip("/") == "/goto"
+    return p.scheme in ("http", "https") and is_google_host(p.hostname) and unquote(p.path).rstrip("/") == "/goto"
 
 
 def goto_label(index: int, displayed: Optional[str] = None, pending: bool = False) -> str:
@@ -67,14 +83,18 @@ def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
     if not is_gateway(config):
         raise RuntimeError("fcrawl resolve needs gateway mode (gateway_token in .fcrawlrc)")
     out: dict[str, dict] = {}
-    for i in range(0, len(urls), RESOLVE_CHUNK):
-        chunk = urls[i:i + RESOLVE_CHUNK]
-        resp = requests.post(
-            f"{gateway_url(config)}/gw/resolve",
-            json={"urls": chunk, "wait": wait},
-            headers=gateway_headers(config),
-            timeout=RESOLVE_WAIT_TIMEOUT if wait else RESOLVE_TIMEOUT,
-        )
+    unique = list(dict.fromkeys(urls))  # one redemption attempt per ticket, across chunks
+    for i in range(0, len(unique), RESOLVE_CHUNK):
+        chunk = unique[i:i + RESOLVE_CHUNK]
+        try:
+            resp = requests.post(
+                f"{gateway_url(config)}/gw/resolve",
+                json={"urls": chunk, "wait": wait},
+                headers=gateway_headers(config),
+                timeout=RESOLVE_WAIT_TIMEOUT if wait else RESOLVE_TIMEOUT,
+            )
+        except requests.RequestException as exc:
+            raise RuntimeError(f"gateway resolve failed: {type(exc).__name__}: {exc}") from exc
         if resp.status_code != 200:
             try:
                 message = resp.json().get("error") or f"gateway HTTP {resp.status_code}"
