@@ -105,8 +105,17 @@ def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
         if not isinstance(payload, dict) or not isinstance(payload.get("urls"), list):
             raise RuntimeError("gateway resolve returned an unexpected response")
         for row in payload["urls"]:
-            if isinstance(row, dict) and isinstance(row.get("url"), str):
-                out[row["url"]] = {"resolved": row.get("resolved"), "status": row.get("status", "failed")}
+            # every row must be well-formed: a malformed one is a broken gateway, not a
+            # ticket that silently went missing
+            if not isinstance(row, dict) or not isinstance(row.get("url"), str) \
+                    or row.get("status") not in ("ok", "cooldown", "failed") \
+                    or (row["status"] == "ok") != isinstance(row.get("resolved"), str):
+                raise RuntimeError("gateway resolve returned a malformed row")
+            out[row["url"]] = {"resolved": row.get("resolved") if row["status"] == "ok" else None,
+                               "status": row["status"]}
+        missing = [u for u in chunk if u not in out]
+        if missing:
+            raise RuntimeError(f"gateway resolve answered nothing for {len(missing)} ticket(s)")
     return out
 
 

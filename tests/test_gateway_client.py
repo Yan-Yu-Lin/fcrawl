@@ -608,3 +608,34 @@ def test_r3_resolve_bad_response_body_is_handled(monkeypatch, tmp_path):
     monkeypatch.setattr(g.requests, "post", lambda *a, **k: R2())
     with pytest.raises(RuntimeError):
         g.resolve_via_gateway([GOTO + "a"])
+
+
+# --- astra round 4 ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body", [
+    {"urls": [None]},
+    {"urls": [{"resolved": "https://x", "status": "ok"}]},  # row without url
+    {"urls": []},  # no answer for the ticket we asked about
+    {"urls": [{"url": GOTO + "a", "status": "ok"}]},  # ok without a resolved URL
+    {"urls": [{"url": GOTO + "a", "status": "weird", "resolved": None}]},
+])
+def test_r4_malformed_resolve_rows_are_errors(monkeypatch, tmp_path, body):
+    from fcrawl.cli import cli
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return body
+
+    monkeypatch.setattr(g.requests, "post", lambda *a, **k: R())
+    with pytest.raises(RuntimeError):
+        g.resolve_via_gateway([GOTO + "a"])
+    out = CliRunner().invoke(cli, ["resolve", "--json", GOTO + "a"])
+    assert out.exit_code == 1, out.output
+    assert "not_a_ticket" not in out.output and "Traceback" not in out.output

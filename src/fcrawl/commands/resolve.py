@@ -36,9 +36,9 @@ def resolve(urls: tuple[str, ...], wait: bool, json_output: bool):
         console.print(f"[red]Error: {exc}[/red]")
         raise click.Abort()
     for u in urls:
-        if u in answers:
-            a = answers[u]
-            rows.append({"url": u, "resolved": a.get("resolved"), "status": a.get("status", "failed")})
+        if u in tickets:
+            a = answers[u]  # resolve_via_gateway guarantees an answer for every ticket it was given
+            rows.append({"url": u, "resolved": a["resolved"], "status": a["status"]})
         else:
             rows.append({"url": u, "resolved": u, "status": "not_a_ticket"})
     failed = sum(1 for r in rows if r["status"] == "failed")
