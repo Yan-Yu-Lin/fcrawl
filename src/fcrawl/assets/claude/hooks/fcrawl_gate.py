@@ -4,7 +4,7 @@
 PostToolUse[Skill]           fcrawl skill loaded successfully → touch a marker
                              (covers the transcript's async write lag).
 PreToolUse[WebSearch|WebFetch]
-PreToolUse[Bash] (fcrawl …)  deny unless the fcrawl skill text is in THIS agent's
+PreToolUse[Bash|PowerShell]  (fcrawl …) deny unless the fcrawl skill text is in THIS agent's
                              context window *since its last compaction*; after
                              that stay silent (normal permissions).
 SessionStart[compact]        re-inject the hard rules as additionalContext so the
@@ -17,8 +17,10 @@ Skill always re-sends the full text, so we just make the agent do that once per
 compaction. Subagents report the main session_id, so every key includes agent_id
 and we read the subagent's own transcript under <session>/subagents/.
 
-Runs on the system python3 (macOS ships 3.9): stdlib only, and the annotations
-are strings (`from __future__`) so `Path | None` does not blow up at import.
+Runs on the system python3 (macOS ships 3.9; Windows `py -3`): stdlib only, the
+annotations are strings (`from __future__`) so `Path | None` does not blow up at
+import, and every file is read/written as UTF-8 whatever the locale (zh-TW
+Windows defaults to cp950, which cannot decode SKILL.md's "—" and "→").
 """
 from __future__ import annotations
 
@@ -37,8 +39,11 @@ CLAUDE_DIR = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or (pathlib.Path.h
 SKILL_FILE = CLAUDE_DIR / "skills" / SKILL / "SKILL.md"
 STATE_DIR = CLAUDE_DIR / "state" / "fcrawl-gate"
 GATED_TOOLS = {"WebSearch", "WebFetch"}
+SHELL_TOOLS = {"Bash", "PowerShell"}  # Windows Claude Code has a separate PowerShell tool
 TRACE = (STATE_DIR / "TRACE").exists()
-FCRAWL_CMD = re.compile(r"(^|[\s;&|(`])fcrawl(\s|$)")
+# `fcrawl …`, `& fcrawl …` (PowerShell call operator), `fcrawl.exe …`, `.\fcrawl.exe`,
+# after any shell separator; never `myfcrawl` or `fcrawl-gateway`
+FCRAWL_CMD = re.compile(r"(^|[\s;&|(`{}])(?:\.[\\/])?fcrawl(?:\.exe)?(?=\s|$)")
 
 DENY_REASON = (
     "The fcrawl rules are not in your current context (either this agent never "
@@ -109,7 +114,7 @@ def loaded_in_window(d: dict) -> bool:
     cache = scan_cache_path(tp)
     st = {"off": 0, "ok": False, "bt": 0.0}
     try:
-        st.update(json.loads(cache.read_text()))
+        st.update(json.loads(cache.read_text(encoding="utf-8")))
     except (OSError, ValueError):
         pass
 
@@ -126,7 +131,7 @@ def loaded_in_window(d: dict) -> bool:
                 st["ok"] = True
         st["off"] = fh.tell()
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    cache.write_text(json.dumps(st))
+    cache.write_text(json.dumps(st), encoding="utf-8")
 
     if st["ok"]:
         return True
@@ -139,8 +144,8 @@ def loaded_in_window(d: dict) -> bool:
 def hard_rules() -> str:
     """The 'Hard rules' section of SKILL.md, for re-injection after compaction."""
     try:
-        text = SKILL_FILE.read_text()
-    except OSError:
+        text = SKILL_FILE.read_text(encoding="utf-8")
+    except (OSError, ValueError):
         return ""
     m = re.search(r"## Hard rules.*?(?=\n## )", text, re.S)
     return m.group(0).strip() if m else ""
@@ -148,7 +153,9 @@ def hard_rules() -> str:
 
 def main() -> None:
     try:
-        d = json.load(sys.stdin)
+        # PowerShell 5.1 prepends a UTF-8 BOM when piping into a native program;
+        # utf-8-sig swallows it, plain utf-8 would make json fail -> silent allow
+        d = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
     except Exception:
         sys.exit(0)
 
@@ -157,7 +164,7 @@ def main() -> None:
     if TRACE:
         try:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
-            with (STATE_DIR / "trace.log").open("a") as fh:
+            with (STATE_DIR / "trace.log").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"t": time.time(), "ev": event, "tool": tool,
                                      "aid": d.get("agent_id"), "cmd": (d.get("tool_input") or {}).get("command", "")[:60]}) + "\n")
         except OSError:
@@ -188,7 +195,7 @@ def main() -> None:
 
     if event == "PreToolUse":
         gated = tool in GATED_TOOLS
-        if tool == "Bash":
+        if tool in SHELL_TOOLS:
             gated = bool(FCRAWL_CMD.search((d.get("tool_input") or {}).get("command") or ""))
         if not gated:
             sys.exit(0)
@@ -197,7 +204,7 @@ def main() -> None:
         except Exception:
             ok = True  # fail open: a broken gate must not block the web
         if TRACE:
-            with (STATE_DIR / "trace.log").open("a") as fh:
+            with (STATE_DIR / "trace.log").open("a", encoding="utf-8") as fh:
                 fh.write(json.dumps({"decision": "allow" if ok else "deny", "aid": d.get("agent_id")}) + "\n")
         if ok:
             sys.exit(0)
