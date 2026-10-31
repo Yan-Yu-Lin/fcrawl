@@ -22,6 +22,7 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from importlib import resources
 from pathlib import Path
@@ -50,10 +51,13 @@ Usually don't `cat` files in Bash — use the Read tool.
 # (event, matcher) -> the gate runs there. Mirrors Arthur's settings.json.
 HOOK_SLOTS: tuple[tuple[str, str], ...] = (
     ("PreToolUse", "WebSearch|WebFetch"),
-    ("PreToolUse", "Bash"),
+    ("PreToolUse", "Bash|PowerShell"),  # Windows Claude Code has a separate PowerShell tool
     ("PostToolUse", "Skill"),
     ("SessionStart", "compact"),
 )
+# matchers earlier versions wrote for the same slot: an entry under one of these is
+# ours too and is moved to the current matcher on re-run
+LEGACY_MATCHERS: dict[tuple[str, str], tuple[str, ...]] = {("PreToolUse", "Bash|PowerShell"): ("Bash",)}
 
 
 def claude_dir() -> Path:
@@ -70,12 +74,11 @@ def python_for_hooks() -> str:
     any project and the gate only needs the standard library. If this process runs on
     a system python already, use that exact path."""
     if sys.platform == "win32":
-        # No `python3` on Windows. Prefer the py launcher (always on PATH when Python
-        # is installed), then `python`; hooks run under cmd.exe, so return a command
-        # word rather than a path with backslashes to quote.
+        # No `python3` on Windows (Git Bash has none either). Prefer the py launcher,
+        # then `python`: a command word, not a path with backslashes to quote.
         if shutil.which("py"):
             return "py -3"
-        return shutil.which("python") or "python"
+        return "python"
     exe = Path(sys.executable).resolve()
     system_prefixes = ("/usr/bin/", "/usr/local/bin/", "/opt/homebrew/bin/", "/bin/")
     if str(exe).startswith(system_prefixes) and ".venv" not in str(exe) and "/uv/" not in str(exe):
@@ -86,38 +89,54 @@ def python_for_hooks() -> str:
     return shutil.which("python3") or "python3"
 
 
-def _quote(arg: str) -> str:
-    """Quote for the shell hooks run in: POSIX sh on Unix, cmd.exe on Windows
-    (double quotes only; single quotes are literal there)."""
-    if sys.platform == "win32":
-        return f'"{arg}"' if (" " in arg or "(" in arg) else arg
-    return shlex.quote(arg)
+def hook_shell_path(path: Path) -> str:
+    """How the gate's path is written in the hook command. Claude Code runs hook commands
+    through Git Bash on Windows (not cmd.exe), where an unquoted backslash is an escape:
+    `C:\\Users\\x\\.claude\\hooks\\fcrawl_gate.py` became `Usersx.claudehooksfcrawl_gate.py`
+    (exit 2 → every Bash call blocked). Forward slashes are what every shell and
+    Python on Windows accept, so the command is `py -3 C:/Users/x/.claude/hooks/fcrawl_gate.py`."""
+    return path.as_posix() if (sys.platform == "win32" or "\\" in str(path)) else str(path)
 
 
 def gate_command(gate_path: Path, python: str) -> str:
-    """Shell-quoted, so a config dir with a space ("~/claude config") still runs.
-    `python` may be a command with flags (`py -3`), so it is not quoted as one word."""
-    return f"{python} {_quote(str(gate_path))}"
+    """POSIX-quoted (hooks run in sh / Git Bash on every platform), so a config dir with
+    a space still runs. `python` may be a command with flags (`py -3`): not quoted as
+    one word."""
+    return f"{python} {shlex.quote(hook_shell_path(gate_path))}"
+
+
+def _normalise_script(word: str) -> str:
+    """A script path as Git Bash would hand it to Python, normalised for comparison:
+    quotes stripped, backslashes as slashes, case-insensitive on Windows."""
+    w = word.strip().strip("'\"")
+    w = w.replace("\\", "/")
+    return w.lower() if sys.platform == "win32" else w
 
 
 def hook_script(hook: Any) -> str | None:
-    """The script a command hook runs: last word of `<python> <script>`; None otherwise."""
+    """The script a command hook runs: last word of `<python> <script>` (quotes removed,
+    slashes normalised), or None. Understands the three forms setup has ever written:
+    `py -3 C:/x/fcrawl_gate.py` (current), `py -3 'C:\\x\\fcrawl_gate.py'` and the bare
+    backslash form `py -3 C:\\x\\fcrawl_gate.py` (both legacy; the bare one is what Git
+    Bash mangled), so a re-run replaces them instead of leaving stale entries."""
     if not isinstance(hook, dict) or hook.get("type") != "command" or not isinstance(hook.get("command"), str):
         return None
+    cmd = hook["command"].strip()
+    if not cmd:
+        return None
     try:
-        # posix=False keeps Windows backslashes; strip the quotes ourselves.
-        words = shlex.split(hook["command"], posix=(sys.platform != "win32"))
+        # posix=False keeps backslashes (a legacy unquoted Windows path would otherwise
+        # be eaten exactly as Git Bash eats it); quotes are stripped by _normalise_script
+        words = shlex.split(cmd, posix=False)
     except ValueError:
         return None
-    if not words:
-        return None
-    return words[-1].strip('"') if sys.platform == "win32" else words[-1]
+    return _normalise_script(words[-1]) if words else None
 
 
 def is_gate_hook(hook: Any, gate_path: Path) -> bool:
     """Ours = runs exactly the gate file setup installs (another fcrawl_gate.py elsewhere
-    on the machine is somebody else's)."""
-    return hook_script(hook) == str(gate_path)
+    on the machine is somebody else's), in any of the forms setup has written."""
+    return hook_script(hook) == _normalise_script(str(gate_path))
 
 
 class Plan:
@@ -263,6 +282,16 @@ def merge_hooks(settings: dict, gate_path: Path, command: str) -> tuple[dict, in
         groups = hooks.setdefault(event, [])
         if not isinstance(groups, list):
             raise click.ClickException(f"settings.json: hooks.{event} is not a list")
+        # an entry of ours under a matcher an older setup wrote (e.g. "Bash" before the
+        # PowerShell tool existed) is removed from there and re-added under the current one
+        for legacy in LEGACY_MATCHERS.get((event, matcher), ()):
+            for g in groups:
+                if isinstance(g, dict) and g.get("matcher") == legacy and isinstance(g.get("hooks"), list):
+                    before = len(g["hooks"])
+                    g["hooks"] = [h for h in g["hooks"] if not is_gate_hook(h, gate_path)]
+                    updated += before - len(g["hooks"])
+            groups[:] = [g for g in groups if not (isinstance(g, dict) and g.get("matcher") == legacy
+                                                   and isinstance(g.get("hooks"), list) and not g["hooks"])]
         ours = [h for g in groups if isinstance(g, dict) and g.get("matcher") == matcher
                 for h in (g.get("hooks") or []) if is_gate_hook(h, gate_path)]
         if ours:
@@ -324,6 +353,145 @@ def remove_section(text: str) -> str:
     return before + text[end:]
 
 
+def ensure_pythonutf8_windows(dry_run: bool) -> str | None:
+    """Windows only: set the user-level PYTHONUTF8=1 (belt and braces with the in-process
+    UTF-8 fixes: it also covers the hook and any Python the agent runs). Idempotent.
+    Returns a one-line status for the plan, None off Windows."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except ImportError:
+        return "env        PYTHONUTF8: winreg not available; set user-level PYTHONUTF8=1 by hand"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+            try:
+                current, _ = winreg.QueryValueEx(key, "PYTHONUTF8")
+            except FileNotFoundError:
+                current = None
+    except OSError as exc:
+        return f"env        PYTHONUTF8: could not read the user environment ({exc})"
+    if str(current) == "1":
+        return "env        PYTHONUTF8=1 already set (user level)"
+    if dry_run:
+        return "env        set user-level PYTHONUTF8=1 (setx)"
+    try:
+        subprocess.run(["setx", "PYTHONUTF8", "1"], check=True, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"env        PYTHONUTF8: setx failed ({exc}); set it by hand in System Properties"
+    return "env        set user-level PYTHONUTF8=1; fully quit and restart the Claude app to pick it up"
+
+
+DOCTOR_PAYLOAD = {"hook_event_name": "PreToolUse", "tool_name": "WebSearch", "tool_input": {"query": "x"},
+                  "session_id": "fcrawl-doctor", "transcript_path": "/nonexistent-fcrawl-doctor"}
+
+
+def shell_for_hooks() -> list[str] | None:
+    """The shell Claude Code runs hook commands in: sh/bash on Unix, Git Bash on Windows.
+    None when no bash can be found (then the doctor falls back to PowerShell)."""
+    if sys.platform != "win32":
+        return ["/bin/sh", "-c"]
+    for candidate in (shutil.which("bash"), r"C:\Program Files\Git\bin\bash.exe",
+                      r"C:\Program Files\Git\usr\bin\bash.exe"):
+        if candidate and Path(candidate).exists():
+            return [candidate, "-c"]
+    return None
+
+
+def run_hook_command(command: str, payload: dict) -> tuple[int, str, str, str]:
+    """Run the exact command string from settings.json the way Claude Code does (through
+    the shell), feeding `payload` on stdin. Returns (exit code, stdout, stderr, how)."""
+    data = json.dumps(payload).encode("utf-8")
+    shell = shell_for_hooks()
+    if shell is not None:
+        argv, how = shell + [command], f"{Path(shell[0]).name} -c"
+    else:
+        argv, how = ["powershell", "-NoProfile", "-Command", command], "powershell -Command"
+    try:
+        r = subprocess.run(argv, input=data, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", str(exc), how
+    return r.returncode, r.stdout.decode("utf-8", "replace"), r.stderr.decode("utf-8", "replace"), how
+
+
+def run_doctor(base: Path) -> int:
+    """Check an installed integration end to end; returns the number of problems."""
+    problems = 0
+    gate = base / "hooks" / GATE_NAME
+    skill = base / "skills" / SKILL_NAME / "SKILL.md"
+    settings_path = base / "settings.json"
+    console.print(f"[bold]fcrawl ↔ Claude Code doctor ({base})[/bold]")
+
+    def ok(msg: str) -> None:
+        console.print(f"  [green]ok[/green]    {msg}", markup=True, highlight=False)
+
+    def bad(msg: str) -> None:
+        nonlocal problems
+        problems += 1
+        console.print(f"  [red]FAIL[/red]  {msg}", markup=True, highlight=False)
+
+    if skill.exists():
+        try:
+            text = skill.read_text(encoding="utf-8")
+            ok(f"skill at {skill} ({len(text.splitlines())} lines)" if "## Hard rules" in text
+               else f"skill at {skill} but it has no '## Hard rules' section")
+        except (OSError, ValueError) as exc:
+            bad(f"skill at {skill} cannot be read as UTF-8: {exc}")
+    else:
+        bad(f"skill missing: {skill} (run `fcrawl setup claude-code`)")
+    if gate.exists():
+        ok(f"hook file at {gate}")
+    else:
+        bad(f"hook file missing: {gate} (run `fcrawl setup claude-code`)")
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8")) if settings_path.exists() else {}
+    except (OSError, ValueError) as exc:
+        bad(f"{settings_path} unreadable: {exc}")
+        settings = {}
+    commands: dict[tuple[str, str], str] = {}
+    for ev, groups in (settings.get("hooks") or {}).items():
+        for g in groups if isinstance(groups, list) else []:
+            if not isinstance(g, dict):
+                continue
+            for h in g.get("hooks") or []:
+                if is_gate_hook(h, gate):
+                    commands[(ev, g.get("matcher"))] = h["command"]
+    for slot in HOOK_SLOTS:
+        if slot in commands:
+            ok(f"settings: {slot[0]}[{slot[1]}] -> {commands[slot]}")
+        else:
+            bad(f"settings: no gate entry for {slot[0]}[{slot[1]}]")
+    stale = [(k, v) for k, v in commands.items() if k not in HOOK_SLOTS]
+    for k, v in stale:
+        bad(f"settings: stale gate entry {k[0]}[{k[1]}] (re-run `fcrawl setup claude-code` to migrate)")
+    if commands:
+        command = next(iter(commands.values()))
+        words = command.split()
+        interp = shutil.which(words[0]) if words else None
+        if interp:
+            ok(f"interpreter `{words[0]}` -> {interp}")
+        else:
+            bad(f"interpreter `{words[0] if words else '?'}` not found on PATH")
+        code, out, err, how = run_hook_command(command, DOCTOR_PAYLOAD)
+        decision = None
+        try:
+            decision = json.loads(out).get("hookSpecificOutput", {}).get("permissionDecision")
+        except (ValueError, AttributeError):
+            pass
+        if code == 0 and decision == "deny":
+            ok(f"hook run ({how}): exit 0, WebSearch denied before the skill is loaded (expected)")
+        elif code == 0:
+            bad(f"hook run ({how}): exit 0 but no deny decision (stdout: {out[:120]!r})")
+        else:
+            bad(f"hook run ({how}): exit {code} — Claude Code would block the tool call. stderr: {err.strip()[:200]!r}")
+    if sys.platform == "win32":
+        env = os.environ.get("PYTHONUTF8")
+        (ok if env == "1" else bad)(f"PYTHONUTF8={env!r} in this process"
+                                    + ("" if env == "1" else " (set user-level PYTHONUTF8=1 and restart the Claude app)"))
+    console.print("[green]All good.[/green]" if not problems else f"[red]{problems} problem(s).[/red]")
+    return problems
+
+
 @click.group()
 def setup():
     """Install integrations for a new user (Claude Code hooks + skill)."""
@@ -334,7 +502,9 @@ def setup():
 @click.option("--uninstall", is_flag=True, help="Remove the skill, the gate hook, its settings entries and the CLAUDE.md section")
 @click.option("--python", "python_path", default=None,
               help="Interpreter for the hook command (default: a system python3; the gate needs only the stdlib)")
-def setup_claude_code(dry_run: bool, uninstall: bool, python_path: Optional[str]):
+@click.option("--doctor", is_flag=True, help="Check an installed integration: files, settings entries, interpreter, "
+                                             "and run the hook once exactly as Claude Code would")
+def setup_claude_code(dry_run: bool, uninstall: bool, python_path: Optional[str], doctor: bool):
     """Set up Claude Code to use fcrawl for all web access.
 
     \b
@@ -348,6 +518,8 @@ def setup_claude_code(dry_run: bool, uninstall: bool, python_path: Optional[str]
     settings.json or CLAUDE.md is touched. CLAUDE_CONFIG_DIR is honoured.
     """
     base = claude_dir()
+    if doctor:
+        raise SystemExit(1 if run_doctor(base) else 0)
     plan = Plan(base, python_path or python_for_hooks())
     if uninstall:
         plan.plan_uninstall()
@@ -358,6 +530,9 @@ def setup_claude_code(dry_run: bool, uninstall: bool, python_path: Optional[str]
         console.print(f"  {a}", markup=False, highlight=False)
     if any(a.split()[1:2] == ["ERROR:"] for a in plan.actions):
         raise click.Abort()
+    env_line = None if uninstall else ensure_pythonutf8_windows(dry_run)
+    if env_line:
+        console.print(f"  {env_line}", markup=False, highlight=False)
     if dry_run:
         return
     if uninstall:
@@ -371,3 +546,4 @@ def setup_claude_code(dry_run: bool, uninstall: bool, python_path: Optional[str]
     console.print("  2. Make sure ~/.fcrawlrc has your gateway: "
                   '{"api_url": "https://<gateway>", "gateway_token": "fgw_<name>_<token>"}')
     console.print("  3. In Claude Code, ask for a web search: it should load the fcrawl skill and run `fcrawl search`.")
+    console.print("  Check it: fcrawl setup claude-code --doctor")

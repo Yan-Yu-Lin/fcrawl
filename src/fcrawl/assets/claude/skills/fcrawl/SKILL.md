@@ -221,5 +221,12 @@ fcrawl x tweets handle
 - `fcrawl crawl` may miss links — `scrape URL --raw --wait 5000 -f links` first, then scrape each.
 - `fcrawl cache stats | clean --yes | clear <bucket>`.
 
+## Windows / PowerShell
+
+- Prefer the **Bash tool** (Git Bash): every example in this file works there unchanged, and `fcrawl` is on PATH as `fcrawl.exe`. The PowerShell tool is gated the same way (load this skill first).
+- In PowerShell: no `( … ) &` / `wait`, and PowerShell 5.1 has no `&&`/`||`. Run parallel searches as **separate Bash tool calls in one message**, or `Start-Job { fcrawl search "q" } ; Get-Job | Wait-Job | Receive-Job`. Chain with `;`.
+- Paths: saved pages land under `$env:TEMP\fcrawl-saved\` (not `/tmp/fcrawl-saved`); the `RESULT path=…` line tells you where. Read them with the Read tool as usual.
+- Output is UTF-8 regardless of the console code page; if you ever see `UnicodeEncodeError`, run `fcrawl setup claude-code --doctor`.
+
 ## Why fcrawl over the built-in tools
 WebSearch/WebFetch pipe content through a summarisation sub-model before you see it — a book report, not the book. For API docs, parameter schemas, migration guides, the nuance is destroyed. fcrawl gives the real page: raw HTML, clean article, just links, CSS-filtered sections — your choice.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 
 import pytest
 from click.testing import CliRunner
@@ -68,7 +69,7 @@ def test_fresh_install_dry_run_then_install(cdir):
     assert gate.read_text() == su.asset("hooks", "fcrawl_gate.py")
     assert gate.stat().st_mode & stat.S_IXUSR
     settings = json.loads((cdir / "settings.json").read_text())
-    assert gate_cmds(settings, cdir) == [("PostToolUse", "Skill"), ("PreToolUse", "Bash"),
+    assert gate_cmds(settings, cdir) == [("PostToolUse", "Skill"), ("PreToolUse", "Bash|PowerShell"),
                                    ("PreToolUse", "WebSearch|WebFetch"), ("SessionStart", "compact")]
     cmd = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert cmd.endswith(f" {gate}") and cmd.split()[0].endswith("python3")
@@ -90,16 +91,16 @@ def test_merge_keeps_other_hooks_and_settings(cdir):
     # every original hook is still there, in place
     pre = settings["hooks"]["PreToolUse"]
     assert pre[0] == ARTHUR_LIKE["hooks"]["PreToolUse"][0]
-    assert pre[1]["matcher"] == "Bash" and pre[1]["hooks"][0]["command"] == "/x/other_bash_hook.py"
+    assert pre[1] == ARTHUR_LIKE["hooks"]["PreToolUse"][1]  # the user's "Bash" group untouched
     gate = cdir / "hooks" / "fcrawl_gate.py"
-    assert su.is_gate_hook(pre[1]["hooks"][1], gate)  # appended to the existing Bash group
     assert pre[2]["matcher"] == "WebSearch|WebFetch" and su.is_gate_hook(pre[2]["hooks"][0], gate)
+    assert pre[3]["matcher"] == "Bash|PowerShell" and su.is_gate_hook(pre[3]["hooks"][0], gate)
     ss = settings["hooks"]["SessionStart"][0]
     assert ss["matcher"] == "compact" and ss["hooks"][0]["command"] == "bash /x/herdr.sh" and su.is_gate_hook(ss["hooks"][1], gate)
     post = settings["hooks"]["PostToolUse"]
     assert post[0] == ARTHUR_LIKE["hooks"]["PostToolUse"][0] and post[1]["hooks"][0]["timeout"] == 15
     assert post[2]["matcher"] == "Skill"
-    assert gate_cmds(settings, cdir) == [("PostToolUse", "Skill"), ("PreToolUse", "Bash"),
+    assert gate_cmds(settings, cdir) == [("PostToolUse", "Skill"), ("PreToolUse", "Bash|PowerShell"),
                                    ("PreToolUse", "WebSearch|WebFetch"), ("SessionStart", "compact")]
     # backup of the pre-setup file
     assert json.loads((cdir / "settings.json.bak-fcrawl-setup").read_text()) == ARTHUR_LIKE
@@ -249,3 +250,202 @@ def test_r1_ownership_is_the_exact_path_and_interpreter_updates(cdir):
     assert run("--uninstall").exit_code == 0
     settings = json.loads((cdir / "settings.json").read_text())
     assert settings["hooks"] == {"PreToolUse": [{"matcher": "Bash", "hooks": [other]}]}
+
+
+# --- Windows round (Jack's report, 2026-10-31) -------------------------------------------
+
+
+def test_win_hook_command_uses_forward_slashes_and_py_launcher(monkeypatch):
+    """#1: on Windows the gate path is written with forward slashes (Git Bash eats unquoted
+    backslashes) and the interpreter is `py -3` (no python3 on Windows / Git Bash)."""
+    from pathlib import PureWindowsPath
+
+    monkeypatch.setattr(su.sys, "platform", "win32")
+    monkeypatch.setattr(su.shutil, "which", lambda name: r"C:\Windows\py.exe" if name == "py" else None)
+    assert su.python_for_hooks() == "py -3"
+    gate = PureWindowsPath(r"C:\Users\jason\.claude\hooks\fcrawl_gate.py")
+    cmd = su.gate_command(gate, "py -3")
+    assert cmd == "py -3 C:/Users/jason/.claude/hooks/fcrawl_gate.py"
+    assert "\\" not in cmd
+    # a space in the path is quoted POSIX-style (the shell is Git Bash)
+    assert su.gate_command(PureWindowsPath(r"C:\Users\jason lin\.claude\hooks\fcrawl_gate.py"), "py -3") \
+        == "py -3 'C:/Users/jason lin/.claude/hooks/fcrawl_gate.py'"
+    # no py launcher: plain `python`
+    monkeypatch.setattr(su.shutil, "which", lambda name: None)
+    assert su.python_for_hooks() == "python"
+
+
+def test_win_ownership_recognises_legacy_forms(monkeypatch):
+    """#1: entries written by earlier versions (bare backslashes, '…'-quoted backslashes)
+    and the current forward-slash form are all ours; a different script is not."""
+    from pathlib import PureWindowsPath
+
+    monkeypatch.setattr(su.sys, "platform", "win32")
+    gate = PureWindowsPath(r"C:\Users\jason\.claude\hooks\fcrawl_gate.py")
+    forms = [
+        r"py -3 C:\Users\jason\.claude\hooks\fcrawl_gate.py",
+        r"py -3 'C:\Users\jason\.claude\hooks\fcrawl_gate.py'",
+        r'py -3 "C:\Users\jason\.claude\hooks\fcrawl_gate.py"',
+        "py -3 C:/Users/jason/.claude/hooks/fcrawl_gate.py",
+        "py -3 'C:/Users/jason/.claude/hooks/fcrawl_gate.py'",
+        r"python c:\users\JASON\.claude\hooks\fcrawl_gate.py",  # case-insensitive on Windows
+    ]
+    for f in forms:
+        assert su.is_gate_hook({"type": "command", "command": f}, gate), f
+    assert not su.is_gate_hook({"type": "command", "command": r"py -3 C:\other\fcrawl_gate.py"}, gate)
+    assert not su.is_gate_hook({"type": "command", "command": "py -3 C:/Users/jason/.claude/hooks/other.py"}, gate)
+
+
+def test_win_rerun_migrates_legacy_entries(cdir, monkeypatch):
+    """#1 + #5: a settings.json from the broken install (bare backslashes, matcher "Bash")
+    is rewritten on re-run: forward slashes, matcher "Bash|PowerShell", no stale entries."""
+    cdir.mkdir()
+    gate = cdir / "hooks" / "fcrawl_gate.py"
+    legacy = str(gate).replace("/", "\\")  # what an old setup wrote on Windows
+    other = {"type": "command", "command": "/x/other_bash_hook.py"}
+    (cdir / "settings.json").write_text(json.dumps({"hooks": {
+        "PreToolUse": [
+            {"matcher": "WebSearch|WebFetch", "hooks": [{"type": "command", "command": f"py -3 {legacy}"}]},
+            {"matcher": "Bash", "hooks": [other, {"type": "command", "command": f"py -3 {legacy}"}]},
+        ],
+        "PostToolUse": [{"matcher": "Skill", "hooks": [{"type": "command", "command": f"py -3 '{legacy}'"}]}],
+        "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"py -3 {legacy}"}]},
+    ]}}))
+    # pretend we are on Windows for ownership matching, but keep a Unix interpreter
+    monkeypatch.setattr(su.sys, "platform", "win32")
+    out = run("--python", "py -3")
+    assert out.exit_code == 0, out.output
+    settings = json.loads((cdir / "settings.json").read_text())
+    cmds = {(ev, g["matcher"]): [h["command"] for h in g["hooks"]] for ev, gs in settings["hooks"].items() for g in gs}
+    expected = f"py -3 {gate.as_posix()}"
+    assert cmds[("PreToolUse", "WebSearch|WebFetch")] == [expected]
+    assert cmds[("PreToolUse", "Bash|PowerShell")] == [expected]
+    assert cmds[("PreToolUse", "Bash")] == [other["command"]]  # the user's own Bash hook stays
+    assert cmds[("PostToolUse", "Skill")] == [expected]
+    assert cmds[("SessionStart", "compact")] == [expected]
+    assert all("\\" not in c for cs in cmds.values() for c in cs if "fcrawl_gate" in c)
+    # second run: nothing to do
+    out = run("--python", "py -3")
+    assert "already present" in out.output
+
+
+def test_win_doctor_passes_on_a_good_install_and_flags_a_bad_command(cdir):
+    assert run().exit_code == 0
+    out = run("--doctor")
+    assert out.exit_code == 0, out.output
+    assert "WebSearch denied before the skill is loaded" in out.output and "All good" in out.output
+    assert "Bash|PowerShell" in out.output
+    # break the command the way the Windows bug did (a path the shell mangles) -> FAIL
+    settings = json.loads((cdir / "settings.json").read_text())
+    for gs in settings["hooks"].values():
+        for g in gs:
+            for h in g["hooks"]:
+                h["command"] = h["command"].replace(str(cdir / "hooks" / "fcrawl_gate.py"), "/nonexistent/fcrawl_gate.py")
+    (cdir / "settings.json").write_text(json.dumps(settings))
+    out = run("--doctor")
+    assert out.exit_code == 1 and "no gate entry" in out.output
+    # missing files are reported
+    assert run("--uninstall").exit_code == 0
+    out = run("--doctor")
+    assert out.exit_code == 1 and "skill missing" in out.output and "hook file missing" in out.output
+
+
+def test_win_gate_hook_powershell_bom_and_utf8(cdir, tmp_path):
+    """#4 #5 #7: the installed gate handles a BOM on stdin, gates the PowerShell tool
+    (incl. `& fcrawl` / `fcrawl.exe` syntax), and reads SKILL.md as UTF-8 under a cp950
+    locale."""
+    import subprocess
+
+    assert run().exit_code == 0
+    gate = cdir / "hooks" / "fcrawl_gate.py"
+    env = {**os.environ, "CLAUDE_CONFIG_DIR": str(cdir), "HOME": str(tmp_path), "PYTHONUTF8": "0",
+           "PYTHONIOENCODING": "cp950", "LC_ALL": "C", "LANG": "C"}
+    py = su.python_for_hooks()
+
+    def hook(payload: bytes) -> tuple[int, bytes]:
+        r = subprocess.run([py, str(gate)], input=payload, capture_output=True, env=env)
+        return r.returncode, r.stdout
+
+    bom = b"\xef\xbb\xbf"
+    code, out = hook(bom + b'{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{"command":"& fcrawl search x"},'
+                     b'"session_id":"w1","transcript_path":"/nonexistent"}')
+    assert code == 0 and b'"deny"' in out
+    code, out = hook(b'{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{"command":"Get-Date; fcrawl.exe scrape u"},'
+                     b'"session_id":"w1","transcript_path":"/nonexistent"}')
+    assert code == 0 and b'"deny"' in out
+    code, out = hook(b'{"hook_event_name":"PreToolUse","tool_name":"PowerShell","tool_input":{"command":"Get-ChildItem"},'
+                     b'"session_id":"w1","transcript_path":"/nonexistent"}')
+    assert code == 0 and out == b""
+    code, out = hook(b'{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo fcrawl-gateway; myfcrawl"},'
+                     b'"session_id":"w1","transcript_path":"/nonexistent"}')
+    assert code == 0 and out == b""
+    # compaction re-injection reads the UTF-8 skill under a non-UTF-8 locale
+    code, out = hook(b'{"hook_event_name":"SessionStart","source":"compact"}')
+    assert code == 0 and b"Hard rules" in out
+
+
+def test_win_utf8_output_under_cp950(tmp_path):
+    """#2 #3: a scrape result with Japanese and emoji is written and printed correctly
+    when the process' locale encoding is cp950 and the output is piped."""
+    import subprocess
+    import textwrap
+
+    script = textwrap.dedent('''
+        import json, sys, io
+        from pathlib import Path
+        from fcrawl.utils.output import handle_output, force_utf8_stdio, progress_enabled, Progress
+        from fcrawl.utils.cache import write_cache, read_cache
+        force_utf8_stdio()
+        text = "フォーカス台湾 ー 😀 中文"
+        out = Path(sys.argv[1])
+        handle_output(text, output_file=str(out), json_output=False, pretty=False, format_type="markdown",
+                      display_output=True, announce_saved=False)
+        assert out.read_bytes().decode("utf-8") == text
+        handle_output(text, json_output=False, pretty=False, format_type="markdown")
+        write_cache("scrape", "k1", {"markdown": text})
+        assert read_cache("scrape", "k1")["markdown"] == text
+        assert progress_enabled() is False
+        with Progress() as p:
+            p.add_task("spinning", total=None)
+        handle_output(["https://a/ー", {"url": "https://b/😀"}], json_output=False, pretty=False, format_type="links")
+        print("OK")
+    ''')
+    env = {**os.environ, "PYTHONUTF8": "0", "PYTHONIOENCODING": "cp950", "LC_ALL": "C", "LANG": "C",
+           "FCRAWL_TMP_DIR": str(tmp_path), "PYTHONPATH": "src"}
+    r = subprocess.run([sys.executable, "-c", script, str(tmp_path / "out.md")], capture_output=True, env=env)
+    assert r.returncode == 0, r.stderr.decode("utf-8", "replace")
+    stdout = r.stdout.decode("utf-8")
+    assert "フォーカス台湾 ー 😀 中文" in stdout and "https://a/ー\nhttps://b/😀\n" in stdout and stdout.endswith("OK\n")
+    assert "⠋" not in stdout and "spinning" not in stdout
+
+
+def test_win_pythonutf8_step_is_windows_only(monkeypatch):
+    assert su.ensure_pythonutf8_windows(dry_run=True) is None
+    monkeypatch.setattr(su.sys, "platform", "win32")
+    import types
+
+    class FakeKey:
+        def __init__(self, value):
+            self.value = value
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return None
+
+    def make(value):
+        def query(key, name):
+            if value is None:
+                raise FileNotFoundError(name)
+            return value, 1
+        return types.SimpleNamespace(HKEY_CURRENT_USER=0, OpenKey=lambda *a: FakeKey(value), QueryValueEx=query)
+
+    monkeypatch.setitem(sys.modules, "winreg", make("1"))
+    assert "already set" in su.ensure_pythonutf8_windows(dry_run=True)
+    monkeypatch.setitem(sys.modules, "winreg", make(None))
+    assert "setx" in su.ensure_pythonutf8_windows(dry_run=True)
+    calls = []
+    monkeypatch.setattr(su.subprocess, "run", lambda argv, **k: calls.append(argv))
+    assert "restart the Claude app" in su.ensure_pythonutf8_windows(dry_run=False)
+    assert calls == [["setx", "PYTHONUTF8", "1"]]
