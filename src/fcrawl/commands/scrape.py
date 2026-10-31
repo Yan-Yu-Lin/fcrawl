@@ -20,7 +20,7 @@ from ..utils.config import (
     is_gateway,
     load_config,
 )
-from ..utils.goto import direct_redeem, is_goto, is_short_id, is_ticket_ref
+from ..utils.goto import direct_redeem, is_goto, is_short_id, is_ticket_ref, strip_translate_param
 from ..utils.keypool import KeyPoolExhausted
 from ..utils.output import (
     handle_output,
@@ -552,6 +552,9 @@ def scrape(
         fcrawl scrape https://example.com --save-temp
     """
     pretty = resolve_pretty(pretty)
+    # a Reddit ?tl=zh-hant link from a zh-TW search is the translated copy of the thread;
+    # the original is what we want (and what the cache is keyed on)
+    url = strip_translate_param(url)
 
     if timeout < 1:
         raise click.BadParameter("timeout must be >= 1", param_hint="--timeout")

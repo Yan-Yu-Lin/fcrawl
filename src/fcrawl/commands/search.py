@@ -1,7 +1,9 @@
 """Search command powered by Serper.dev API."""
 
 import os
+import re
 import time
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import click
@@ -16,6 +18,7 @@ from ..utils.output import console, handle_output, resolve_pretty
 
 
 SERPER_ENDPOINT = "https://google.serper.dev/search"
+SERPER_NEWS_ENDPOINT = "https://google.serper.dev/news"
 SERPER_MAX_RESULTS_PER_PAGE = 100
 
 
@@ -36,26 +39,80 @@ def _get_serper_api_key() -> str:
     return config.get("serper_api_key", "")
 
 
-def _parse_locale(locale: Optional[str]) -> tuple[str, str]:
-    """Parse locale string into (gl, hl) for Serper."""
+# Han, Hiragana/Katakana, Hangul, CJK punctuation/fullwidth: a query written in one of
+# these is almost always a Taiwanese user's query; Google ranks local sources better
+# with gl=tw and shows dates in the snippet with hl=zh-tw
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]")
+
+
+def has_cjk(text: str) -> bool:
+    return bool(_CJK_RE.search(text or ""))
+
+
+def _parse_locale(locale: Optional[str], query: str = "") -> tuple[str, str, bool]:
+    """(gl, hl, auto) for Serper. `hl` keeps the region when the tag has one
+    ("zh-TW" -> hl=zh-tw, gl=tw) because Google's own code for Traditional Chinese is
+    zh-TW, not zh. With no locale a CJK query defaults to Taiwan (auto=True)."""
     if not locale:
-        return "us", "en"
+        if has_cjk(query):
+            return "tw", "zh-tw", True
+        return "us", "en", False
 
     parts = locale.replace("_", "-").split("-")
     lang = (parts[0] or "en").lower()
     gl = "us"
+    hl = lang
 
     if len(parts) > 1:
         region = (parts[1] or "").lower()
         if len(region) == 2 and region.isalpha():
             # Standard two-letter country codes pass through (hk->hk, mo->mo, tw->tw)
             gl = region
+            hl = f"{lang}-{region}"
         elif region == "hant":
-            gl = "tw"
+            gl, hl = "tw", f"{lang}-tw"
         elif region == "hans":
-            gl = "cn"
+            gl, hl = "cn", f"{lang}-cn"
 
-    return gl, lang
+    return gl, hl, False
+
+
+_SINCE_RE = re.compile(r"^(\d{1,3})([dwmy])$")
+
+
+def since_to_tbs(since: Optional[str]) -> Optional[str]:
+    """--since 7d / 2w / 3m / 1y -> Serper tbs. Exact Google buckets (qdr:d/w/m/y) when the
+    number is 1, else a custom date range (cdr) from that many days/weeks/months ago."""
+    if not since:
+        return None
+    m = _SINCE_RE.match(since.strip().lower())
+    if not m:
+        raise click.BadParameter("use Nd / Nw / Nm / Ny, e.g. 7d or 2w", param_hint="--since")
+    n, unit = int(m.group(1)), m.group(2)
+    if n < 1:
+        raise click.BadParameter("must be at least 1", param_hint="--since")
+    if n == 1:
+        return f"qdr:{unit}"
+    days = {"d": 1, "w": 7, "m": 30, "y": 365}[unit] * n
+    start = date.today() - timedelta(days=days)
+    return f"cdr:1,cd_min:{start.month}/{start.day}/{start.year},cd_max:"
+
+
+_DATE_FORMATS = ("%b %d, %Y", "%B %d, %Y", "%d %b %Y", "%d %B %Y", "%Y-%m-%d", "%Y年%m月%d日")
+
+
+def iso_date(raw: Optional[str]) -> Optional[str]:
+    """Serper's date ("Jun 11, 2026", "2026年6月11日", "3 days ago") as ISO when it is an
+    absolute date; relative ones are kept as given."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip().rstrip(".")
+    for fmt in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date().isoformat()
+        except ValueError:
+            continue
+    return text
 
 
 def _serper_search(
@@ -66,16 +123,22 @@ def _serper_search(
     api_key: str,
     no_cache: bool = False,
     batches: Optional[int] = None,
+    tbs: Optional[str] = None,
+    news: bool = False,
+    engine: str = "serper",
 ) -> tuple[list[dict], float, Optional[str], int, str, str, dict]:
     """Search using Serper with pagination and deduplication.
 
     Returns (results, elapsed, error, pages, gl, hl, extras).
-    extras contains knowledgeGraph, peopleAlsoAsk, relatedSearches from page 1.
+    extras contains knowledgeGraph, peopleAlsoAsk, relatedSearches from page 1,
+    and `gw` (gateway mode): which engine answered and why.
     `batches` (gateway mode only): how many identical searches the gateway fires
     and merges; None = the gateway's default for this token.
     """
-    gl, hl = _parse_locale(locale)
+    gl, hl, _ = _parse_locale(locale, query)
     endpoint, _ = serper_target()  # api_key already came from serper_target()
+    if news and not is_gateway():
+        endpoint = SERPER_NEWS_ENDPOINT
     headers = {
         "X-API-KEY": api_key,
         "Content-Type": "application/json",
@@ -104,6 +167,12 @@ def _serper_search(
             }
             if location:
                 payload["location"] = location
+            if tbs:
+                payload["tbs"] = tbs
+            if news:
+                payload["type"] = "news"  # gateway: Serper /news; direct: endpoint above
+            if engine != "serper":
+                payload["engine"] = engine  # gateway only; Serper ignores unknown fields
 
             response = requests.post(
                 endpoint,
@@ -141,8 +210,10 @@ def _serper_search(
                     extras["peopleAlsoAsk"] = data["peopleAlsoAsk"]
                 if data.get("relatedSearches"):
                     extras["relatedSearches"] = data["relatedSearches"]
+                if isinstance(data.get("gw"), dict):
+                    extras["gw"] = {k: v for k, v in data["gw"].items() if k in ("gwEngine", "gwSerperError", "gwProvider")}
 
-            organic = data.get("organic", [])
+            organic = data.get("organic") or (data.get("news") if news else None) or []
             if not organic:
                 break
 
@@ -162,6 +233,8 @@ def _serper_search(
                 }
                 if item.get("date"):
                     result_item["date"] = item["date"]
+                if item.get("source") and news:
+                    result_item["source"] = item["source"]
                 if item.get("sitelinks"):
                     result_item["sitelinks"] = item["sitelinks"]
                 if is_goto(url) or item.get("gwGoto"):
@@ -203,6 +276,10 @@ def _display_debug_info(
     pages: int,
     from_cache: bool,
     location: Optional[str],
+    engine: str = "serper",
+    auto_locale: bool = False,
+    tbs: Optional[str] = None,
+    gw: Optional[dict] = None,
 ):
     """Display debug information about Serper request handling."""
     console.print("\n[bold cyan]Search Debug:[/bold cyan]")
@@ -211,14 +288,17 @@ def _display_debug_info(
     table.add_column("Field")
     table.add_column("Value")
 
-    table.add_row("Provider", "Serper (Google)")
+    table.add_row("Provider", "Firecrawl search" if engine == "firecrawl" else "Serper (Google)")
+    if gw and gw.get("gwSerperError"):
+        table.add_row("Serper error", str(gw["gwSerperError"]))
     table.add_row("Source", "Cache" if from_cache else "Network")
     table.add_row("Results", str(result_count))
     table.add_row("Response Time", f"{elapsed * 1000:.0f}ms")
     table.add_row("Pages Used", str(pages))
-    table.add_row("Country (gl)", gl)
-    table.add_row("Language (hl)", hl)
+    table.add_row("Country (gl)", gl + (" (auto: CJK query)" if auto_locale else ""))
+    table.add_row("Language (hl)", hl + (" (auto: CJK query)" if auto_locale else ""))
     table.add_row("Location", location or "(none)")
+    table.add_row("Time filter (tbs)", tbs or "(none)")
 
     console.print(table)
 
@@ -259,6 +339,9 @@ def _display_results(results: list[dict]):
         console.print(url, style="blue", markup=False)
         if description:
             console.print(description, markup=False)
+        shown_date = iso_date(item.get("date"))
+        if shown_date:
+            console.print(f"  · {shown_date}", style="dim", markup=False)
         if item.get("goto") and not item.get("resolved"):
             console.print(f"  → fcrawl scrape {goto_ref(item)}", style="dim", markup=False)
         console.print()
@@ -320,6 +403,12 @@ def resolve_results(results: list[dict], wait: bool = False) -> int:
               help="Gateway: number of identical Serper searches to merge (1-3; default: the gateway's)")
 @click.option("--resolve", "resolve_goto", is_flag=True,
               help="Gateway: ask it for the real URL behind each [goto] ticket after the search")
+@click.option("--engine", type=click.Choice(["serper", "firecrawl"]), default="serper", show_default=True,
+              help="Gateway: search engine. Serper (Google) is default and cheap; firecrawl costs 2 Firecrawl "
+                   "credits per 10 results but returns real URLs, no goto tickets")
+@click.option("--tbs", default=None, help="Google time filter: qdr:d (day), qdr:w, qdr:m, qdr:y")
+@click.option("--since", default=None, help="Only results newer than Nd/Nw/Nm/Ny (e.g. 7d, 2w); sugar for --tbs")
+@click.option("--news", is_flag=True, help="Google News results (Serper /news) instead of web results")
 def search(
     query: str,
     limit: int,
@@ -335,6 +424,10 @@ def search(
     single: bool,
     batches: Optional[int],
     resolve_goto: bool,
+    engine: str,
+    tbs: Optional[str],
+    since: Optional[str],
+    news: bool,
 ):
     """Search the web using Serper.dev (Google API).
 
@@ -353,10 +446,19 @@ def search(
     if batches is not None and not is_gateway():
         console.print("[dim]--single/--batches only apply in gateway mode; ignored[/dim]")
         batches = None
+    if engine != "serper" and not is_gateway():
+        console.print("[red]--engine firecrawl needs gateway mode (gateway_token in .fcrawlrc)[/red]")
+        raise click.Abort()
+    if tbs and since:
+        raise click.BadParameter("use --tbs or --since, not both", param_hint="--since")
+    if since:
+        tbs = since_to_tbs(since)
+    if tbs and not re.match(r"^[A-Za-z0-9:,/_-]{1,64}$", tbs):
+        raise click.BadParameter("unexpected characters", param_hint="--tbs")
 
-    gl, hl = _parse_locale(locale)
+    gl, hl, auto_locale = _parse_locale(locale, query)
     cache_opts = {
-        "engine": "serper",
+        "engine": "serper",  # the gateway caches both engines under one key; so do we
         "limit": limit,
         "gl": gl,
         "hl": hl,
@@ -364,6 +466,10 @@ def search(
     }
     if batches is not None:
         cache_opts["batches"] = batches
+    if tbs:
+        cache_opts["tbs"] = tbs
+    if news:
+        cache_opts["news"] = True
     key = cache_key(query, cache_opts)
 
     cached_data = None
@@ -401,6 +507,9 @@ def search(
                 api_key=api_key,
                 no_cache=no_cache,
                 batches=batches,
+                tbs=tbs,
+                news=news,
+                engine=engine,
             )
 
         if error:
@@ -410,11 +519,13 @@ def search(
         cached_data = {
             "results": results,
             "elapsed": elapsed,
-            "engine": "serper",
+            "engine": (extras.get("gw") or {}).get("gwEngine") or engine,
             "gl": gl,
             "hl": hl,
             "pages": pages,
             "location": location,
+            "tbs": tbs,
+            "news": news,
             "extras": extras,
         }
         write_cache("search", key, cached_data)
@@ -430,6 +541,8 @@ def search(
     pages = int(cache_data.get("pages", 0))
     gl = str(cache_data.get("gl", gl))
     hl = str(cache_data.get("hl", hl))
+    used_engine = str(cache_data.get("engine") or "serper")
+    gw_info = extras.get("gw") if isinstance(extras.get("gw"), dict) else {}
 
     if not results:
         console.print("[yellow]No results found[/yellow]")
@@ -451,6 +564,10 @@ def search(
     if goto_count:
         found += f" ({goto_count} goto ticket(s): scrape them directly, or use --resolve / fcrawl resolve)"
     console.print(f"[green]{found}[/green]")
+    if used_engine == "firecrawl":
+        why = gw_info.get("gwSerperError")
+        console.print(f"[dim]Engine: firecrawl{f' (Serper failed: {why})' if why else ''}[/dim]", markup=True,
+                      highlight=False)
 
     if debug:
         _display_debug_info(
@@ -461,6 +578,10 @@ def search(
             pages=pages,
             from_cache=from_cache,
             location=location,
+            engine=used_engine,
+            auto_locale=auto_locale,
+            tbs=tbs,
+            gw=gw_info,
         )
 
     if pretty and not output and not json_output:
@@ -469,14 +590,18 @@ def search(
     if output or json_output:
         output_data = {
             "query": query,
-            "engine": "serper",
+            "engine": used_engine,
             "results": results,
             "meta": {
                 "gl": gl,
                 "hl": hl,
+                "auto_locale": auto_locale,
                 "pages": pages,
                 "location": location,
+                "tbs": tbs,
+                "news": news,
                 "from_cache": from_cache,
+                **({"serper_error": gw_info["gwSerperError"]} if gw_info.get("gwSerperError") else {}),
             },
         }
         if extras:
@@ -509,5 +634,8 @@ def search(
                     print(f"  {title}")
                 if desc:
                     print(f"  {desc}")
+                shown_date = iso_date(item.get("date"))
+                if shown_date:
+                    print(f"  · {shown_date}")
                 if item.get("goto") and not item.get("resolved"):
                     print(f"  → fcrawl scrape {goto_ref(item)}")

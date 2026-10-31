@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import click
 import pytest
 from click.testing import CliRunner
 
@@ -964,3 +965,146 @@ def test_sr2_scrape_short_id_direct_mode_error(monkeypatch, tmp_path):
     monkeypatch.setattr(sc, "scrape_with_firecrawl", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")))
     out = CliRunner().invoke(cli, ["scrape", "g:7kq2mx", "--no-cache"])
     assert out.exit_code != 0 and "gateway mode" in out.output
+
+
+# --- search round 2: engine, locale, date, tbs/since/news, tl= -------------------------
+
+
+def test_sr2_parse_locale_and_cjk_auto():
+    from fcrawl.commands.search import _parse_locale, has_cjk
+
+    assert _parse_locale("zh-TW") == ("tw", "zh-tw", False)
+    assert _parse_locale("zh_TW") == ("tw", "zh-tw", False)
+    assert _parse_locale("zh-Hant") == ("tw", "zh-tw", False)
+    assert _parse_locale("zh-Hans") == ("cn", "zh-cn", False)
+    assert _parse_locale("ja-JP") == ("jp", "ja-jp", False)
+    assert _parse_locale("en-GB") == ("gb", "en-gb", False)
+    assert _parse_locale("en") == ("us", "en", False)
+    assert _parse_locale(None) == ("us", "en", False)
+    assert _parse_locale(None, "httpx AsyncClient") == ("us", "en", False)
+    assert _parse_locale(None, "成功嶺 新訓 懇親") == ("tw", "zh-tw", True)
+    assert _parse_locale(None, "Hyprland HDR 設定") == ("tw", "zh-tw", True)
+    assert _parse_locale(None, "東京 ラーメン") == ("tw", "zh-tw", True)  # any CJK script -> TW default
+    assert _parse_locale("en-US", "成功嶺") == ("us", "en-us", False)  # explicit wins
+    assert has_cjk("abc") is False and has_cjk("中") and has_cjk("한") and has_cjk("ア")
+
+
+def test_sr2_since_to_tbs_and_iso_date():
+    from fcrawl.commands.search import iso_date, since_to_tbs
+
+    assert since_to_tbs(None) is None
+    assert since_to_tbs("1d") == "qdr:d" and since_to_tbs("1w") == "qdr:w" and since_to_tbs("1m") == "qdr:m"
+    assert since_to_tbs("1y") == "qdr:y"
+    t = since_to_tbs("7d")
+    assert t.startswith("cdr:1,cd_min:") and t.endswith(",cd_max:")
+    with pytest.raises(click.BadParameter):
+        since_to_tbs("week")
+    with pytest.raises(click.BadParameter):
+        since_to_tbs("0d")
+    assert iso_date("Jun 11, 2026") == "2026-06-11"
+    assert iso_date("June 11, 2026") == "2026-06-11"
+    assert iso_date("11 Jun 2026") == "2026-06-11"
+    assert iso_date("2026年6月11日") == "2026-06-11"
+    assert iso_date("2026-06-11") == "2026-06-11"
+    assert iso_date("3 days ago") == "3 days ago"
+    assert iso_date("") is None and iso_date(None) is None
+
+
+def test_sr2_search_sends_tbs_news_engine_and_locale(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+
+    _gw_rc(tmp_path, monkeypatch)
+    sent = []
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 2, "organic": [
+                {"title": "A", "link": "https://a.example/x", "snippet": "s", "position": 1, "date": "Jun 11, 2026"}],
+                    "gw": {"gwEngine": "serper", "gwProvider": "serper"}}
+
+    def post(url, headers=None, json=None, timeout=None):
+        sent.append(json)
+        return R()
+
+    monkeypatch.setattr(s.requests, "post", post)
+    out = CliRunner().invoke(cli, ["search", "成功嶺 新訓", "--no-cache", "--no-pretty", "--since", "1w", "--news",
+                                   "--engine", "firecrawl", "--debug"])
+    assert out.exit_code == 0, out.output
+    body = sent[-1]
+    assert body["gl"] == "tw" and body["hl"] == "zh-tw" and body["tbs"] == "qdr:w" and body["type"] == "news"
+    assert body["engine"] == "firecrawl"
+    assert "· 2026-06-11" in out.output  # the date, ISO
+    assert "auto: CJK query" in out.output  # --debug shows the applied locale
+    # explicit locale, plain web search: no type/engine/tbs keys
+    out = CliRunner().invoke(cli, ["search", "成功嶺", "-L", "en-US", "--no-cache", "--no-pretty"])
+    body = sent[-1]
+    assert body["gl"] == "us" and body["hl"] == "en-us" and "type" not in body and "engine" not in body and "tbs" not in body
+    # --tbs and --since together is an error; bad --tbs is an error
+    assert CliRunner().invoke(cli, ["search", "q", "--tbs", "qdr:d", "--since", "1d"]).exit_code != 0
+    assert CliRunner().invoke(cli, ["search", "q", "--tbs", "qdr:d; rm"]).exit_code != 0
+    # --engine firecrawl needs gateway mode
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"serper_api_key": "sk"}))
+    out = CliRunner().invoke(cli, ["search", "q", "--engine", "firecrawl", "--no-cache"])
+    assert out.exit_code != 0 and "gateway mode" in out.output
+
+
+def test_sr2_search_shows_fallback_engine(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+    from fcrawl.utils import cache as cache_mod
+
+    _gw_rc(tmp_path, monkeypatch)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 2, "organic": [
+                {"title": "F0", "link": "https://fc.example/0", "snippet": "d0", "position": 1,
+                 "displayedLink": "https://fc.example › 0", "gwGoto": False, "date": "2026年6月1日"}],
+                    "gw": {"gwEngine": "firecrawl", "gwProvider": "firecrawl", "gwSerperError": "503 pool_exhausted"}}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
+    out = CliRunner().invoke(cli, ["search", "q", "--no-pretty"])
+    assert out.exit_code == 0, out.output
+    assert "Engine: firecrawl (Serper failed: 503 pool_exhausted)" in out.output
+    assert "· 2026-06-01" in out.output
+    out = CliRunner().invoke(cli, ["search", "q", "--json"])
+    data = json.loads(out.output[out.output.index("{"):])
+    assert data["engine"] == "firecrawl" and data["meta"]["serper_error"] == "503 pool_exhausted"
+    assert data["meta"]["from_cache"] is True  # the cache entry remembered the engine
+    out = CliRunner().invoke(cli, ["search", "q", "--debug", "--no-pretty"])
+    assert "Firecrawl search" in out.output and "503 pool_exhausted" in out.output
+
+
+def test_sr2_strip_translate_param_in_scrape(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import scrape as sc
+    from fcrawl.utils import cache as cache_mod
+    from fcrawl.utils import goto as g
+
+    assert g.strip_translate_param("https://www.reddit.com/r/x/comments/1/t/?tl=zh-hant") == "https://www.reddit.com/r/x/comments/1/t/"
+    assert g.strip_translate_param("https://www.reddit.com/r/x/?a=1&tl=zh-hant") == "https://www.reddit.com/r/x/?a=1"
+    assert g.strip_translate_param("https://example.com/?tl=zh-hant") == "https://example.com/?tl=zh-hant"
+    _gw_rc(tmp_path, monkeypatch)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    seen = []
+
+    def fake_gateway(url, scrape_options, timeout, allow_jina, no_cache=False):
+        from firecrawl.v2.types import Document, DocumentMetadata
+        seen.append(url)
+        doc = Document(markdown="# hi " + "x" * 900, metadata=DocumentMetadata(title="t", url=url, sourceURL=url,
+                                                                              gwProvider="firecrawl"))
+        return sc.TaggedResult(doc, provider="firecrawl")
+
+    monkeypatch.setattr(sc, "scrape_with_gateway", fake_gateway)
+    out = CliRunner().invoke(cli, ["scrape", "https://www.reddit.com/r/x/comments/1/t/?tl=zh-hant", "--save-temp"])
+    assert out.exit_code == 0, out.output
+    assert seen == ["https://www.reddit.com/r/x/comments/1/t/"]
+    # the original URL is now a local cache hit
+    out = CliRunner().invoke(cli, ["scrape", "https://www.reddit.com/r/x/comments/1/t/", "--save-temp"])
+    assert "Using cached result" in out.output

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 import idna
 import requests
@@ -188,3 +188,24 @@ def direct_redeem(url: str, timeout: int = 15) -> tuple[Optional[str], Optional[
         return resp.headers["Location"], None
     match = re.search(r'http-equiv=["\']refresh["\'][^>]*content=["\'](\d+)', resp.text or "", re.IGNORECASE)
     return None, int(match.group(1)) if match else None
+
+
+_REDDIT_HOST_RE = re.compile(r"(^|\.)reddit\.com$", re.IGNORECASE)
+
+
+def strip_translate_param(url: Any) -> Any:
+    """Reddit's machine-translated pages (…?tl=zh-hant) are the same thread: drop the
+    parameter so the original is fetched and cached. Same rule as the gateway."""
+    if not isinstance(url, str) or "tl=" not in url:
+        return url
+    try:
+        p = urlsplit(url)
+    except ValueError:
+        return url
+    if not p.hostname or not _REDDIT_HOST_RE.search(p.hostname):
+        return url
+    pairs = parse_qsl(p.query, keep_blank_values=True)
+    kept = [(k, v) for k, v in pairs if k != "tl"]
+    if len(kept) == len(pairs):
+        return url
+    return urlunsplit((p.scheme, p.netloc, p.path, urlencode(kept), p.fragment))
