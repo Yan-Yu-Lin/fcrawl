@@ -74,6 +74,8 @@ accounts.db
 !CLAUDE.md
 !AGENT_GUIDE.md
 !docs/*.md
+# shipped package data (fcrawl setup claude-code)
+!src/fcrawl/assets/**
 !docs/**/*.md
 !requirements.txt
 # Test fixtures must be tracked even though *.json is otherwise ignored
