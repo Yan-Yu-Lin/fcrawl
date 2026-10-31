@@ -577,7 +577,8 @@ def test_r2_old_cache_rows_get_goto_marker(monkeypatch, tmp_path):
     monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
     key = cache_key("oldq", {"engine": "serper", "limit": 20, "gl": "us", "hl": "en", "location": None})
     write_cache("search", key, {"results": [{"title": "T", "url": GOTO + "old", "description": "d", "position": 1}],
-                                "elapsed": 0.1, "engine": "serper", "gl": "us", "hl": "en", "pages": 1, "location": None, "extras": {}})
+                                "elapsed": 0.1, "engine": "serper", "gl": "us", "hl": "en", "pages": 1, "location": None,
+                                "extras": {}, "goto_expires_at": "2099-01-01T00:00:00+00:00"})
     out = CliRunner().invoke(cli, ["search", "oldq", "--no-pretty"])
     assert out.exit_code == 0, out.output
     assert "[goto #1]" in out.output and f"fcrawl scrape {GOTO}old" in out.output
@@ -792,7 +793,8 @@ def test_sr2_search_shows_scrape_hint_with_short_id(monkeypatch, tmp_path):
                  "gotoId": "g:7kq2mx", "displayedLink": "https://a.example › p"},
                 {"title": "B", "link": GOTO + "b", "snippet": "s", "position": 3, "gwGoto": True,
                  "gotoId": "not-an-id"},
-            ]}
+            ], "gw": {"gwEngine": "serper", "gwProvider": "serper", "gwGoto": True,
+                      "gwGotoExpiresAt": "2099-01-01T00:00:00+00:00"}}
 
     monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
     out = CliRunner().invoke(cli, ["search", "q", "--no-pretty"])
@@ -1208,24 +1210,106 @@ def test_sr2r1_cached_listing_with_ids_expires(monkeypatch, tmp_path):
     assert "Using cached result" in out.output and calls["n"] == n
 
 
-def test_sr2r1_pre_expiry_cache_entries_use_file_age(monkeypatch, tmp_path):
-    """A listing cached by an older client (no goto_expires_at / fetched_at) with tickets
-    is trusted for the registry TTL from the file's mtime, then refetched."""
+def test_sr2r2_listing_expiry_rules(monkeypatch, tmp_path):
+    """Round 2: (a) an entry with tickets and no expiry stamp is never served (its age cannot
+    be established); (b) a page from an older gateway (gwFetchedAt only) expires 2 h after
+    the GATEWAY fetched it, not after we did; (c) a multi-page listing keeps the earliest
+    expiry; (d) a cache hit on a modern gateway is accepted under --engine firecrawl."""
+    from datetime import datetime, timedelta, timezone
+
     from fcrawl.cli import cli
     from fcrawl.commands import search as s
     from fcrawl.utils import cache as cache_mod
-    from fcrawl.utils.cache import cache_key, get_cache_path, write_cache
+    from fcrawl.utils.cache import cache_key, write_cache
 
     _gw_rc(tmp_path, monkeypatch)
     monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    # (a)
     key = cache_key("oldq2", {"engine": "serper", "limit": 20, "gl": "us", "hl": "en", "location": None})
     write_cache("search", key, {"results": [{"title": "T", "url": GOTO + "old", "description": "d", "position": 1}],
                                 "elapsed": 0.1, "engine": "serper", "gl": "us", "hl": "en", "pages": 1, "location": None, "extras": {}})
-    out = CliRunner().invoke(cli, ["search", "oldq2", "--no-pretty"])
-    assert "Using cached result" in out.output
-    import os, time as _t
-    path = get_cache_path("search", key)
-    os.utime(path, (_t.time() - 3 * 3600, _t.time() - 3 * 3600))
     monkeypatch.setattr(s.requests, "post", lambda *a, **k: (_ for _ in ()).throw(s.requests.ConnectionError("no gw")))
     out = CliRunner().invoke(cli, ["search", "oldq2", "--no-pretty"])
-    assert "Using cached result" not in out.output and out.exit_code != 0  # went to the gateway
+    assert "Using cached result" not in out.output and out.exit_code != 0
+    # helper contracts
+    assert s.page_goto_expiry({"gwGotoExpiresAt": "2030-01-01T00:00:00+00:00"}) == "2030-01-01T00:00:00+00:00"
+    assert s.page_goto_expiry({"gwFetchedAt": "2030-01-01T00:00:00+00:00"}) == "2030-01-01T02:00:00+00:00"
+    assert s.page_goto_expiry({"gwProvider": "serper"}) is None
+    assert s.min_expiry("unset", "2030-01-01T00:00:00+00:00") == "2030-01-01T00:00:00+00:00"
+    assert s.min_expiry("2030-01-01T00:00:00+00:00", "2029-01-01T00:00:00+00:00") == "2029-01-01T00:00:00+00:00"
+    assert s.min_expiry("2030-01-01T00:00:00+00:00", None) is None
+    assert s.min_expiry(None, "2030-01-01T00:00:00+00:00") is None
+    # (b)+(c): page 1 modern (expires 2099), page 2 from an old-gateway cache fetched 110 min ago
+    old_fetch = (datetime.now(timezone.utc) - timedelta(minutes=110)).isoformat(timespec="seconds")
+
+    class R:
+        status_code = 200
+
+        def __init__(self, page):
+            self.page = page
+
+        def json(self):
+            if self.page == 1:
+                return {"credits": 2, "organic": [{"title": "A", "link": GOTO + "a", "snippet": "s", "position": 1,
+                                                   "gwGoto": True, "gotoId": "g:7kq2ma"}],
+                        "gw": {"gwEngine": "serper", "gwProvider": "serper", "gwGoto": True,
+                               "gwGotoExpiresAt": "2099-01-01T00:00:00+00:00"}}
+            return {"credits": 1, "organic": [{"title": "B", "link": GOTO + "b", "snippet": "s", "position": 1}],
+                    "gw": {"gwProvider": "cache", "gwCached": True, "gwFetchedAt": old_fetch}}
+
+    monkeypatch.setattr(s.requests, "post", lambda url, headers=None, json=None, timeout=None: R(json["page"]))
+    out = CliRunner().invoke(cli, ["search", "mixed", "-l", "2", "--urls-only", "--no-pretty"])
+    assert out.exit_code == 0 and "g:7kq2ma" in out.output and GOTO + "b" in out.output
+    entry = next(d for _, d in cache_mod.iter_cache("search") if d and d["results"][0].get("gotoId") == "g:7kq2ma")
+    exp = datetime.fromisoformat(entry["goto_expires_at"])
+    assert exp - datetime.now(timezone.utc) < timedelta(minutes=11)  # page 2's: 2 h after ITS fetch, 10 min left
+    assert s.listing_still_usable(entry) is True  # 10 min left, outside the 5-minute margin
+    entry["goto_expires_at"] = (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat(timespec="seconds")
+    assert s.listing_still_usable(entry) is False
+    # (d): a cache hit filled by Serper is a fine answer to --engine firecrawl on a modern gateway
+
+    class Hit:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 0, "organic": [{"title": "A", "link": "https://a.example/", "snippet": "s", "position": 1}],
+                    "gw": {"gwProvider": "cache", "gwCached": True, "gwEngine": "serper", "gwType": "search",
+                           "gwFetchedAt": old_fetch}}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: Hit())
+    out = CliRunner().invoke(cli, ["search", "shared", "--engine", "firecrawl", "--no-cache", "--json"])
+    assert out.exit_code == 0, out.output
+    assert json.loads(out.output[out.output.index("{"):])["engine"] == "serper"
+
+
+def test_sr2r2_firecrawl_answer_stops_pagination(monkeypatch, tmp_path):
+    """Round 2: Firecrawl has no pages; 3 results for -l 5 are returned, page 2 is never asked."""
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+
+    _gw_rc(tmp_path, monkeypatch)
+    pages = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, page):
+            self.page = page
+
+        def json(self):
+            if self.page > 1:
+                raise AssertionError("page 2 must not be requested")
+            return {"credits": 2, "organic": [{"title": f"F{i}", "link": f"https://fc.example/{i}", "snippet": "s",
+                                               "position": i + 1} for i in range(3)],
+                    "gw": {"gwEngine": "firecrawl", "gwProvider": "firecrawl", "gwType": "search", "gwGoto": False,
+                           "gwSerperError": "503 pool_exhausted"}}
+
+    def post(url, headers=None, json=None, timeout=None):
+        pages.append(json["page"])
+        return R(json["page"])
+
+    monkeypatch.setattr(s.requests, "post", post)
+    out = CliRunner().invoke(cli, ["search", "short", "-l", "5", "--no-cache", "--urls-only", "--no-pretty"])
+    assert out.exit_code == 0, out.output
+    assert pages == [1] and out.output.count("https://fc.example/") == 3
+    assert "Engine: firecrawl (Serper failed: 503 pool_exhausted)" in out.output

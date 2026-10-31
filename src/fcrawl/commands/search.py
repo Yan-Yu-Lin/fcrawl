@@ -3,15 +3,15 @@
 import os
 import re
 import time
-from datetime import date, datetime, timedelta
-from typing import Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Optional
 
 import click
 import requests
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from ..utils.cache import cache_key, get_cache_path, read_cache, write_cache
+from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import gateway_url, is_gateway, load_config
 from ..utils.goto import goto_label, is_goto, is_short_id, resolve_via_gateway
 from ..utils.output import console, handle_output, resolve_pretty
@@ -203,6 +203,12 @@ def _serper_search(
 
             data = response.json()
 
+            gw = data.get("gw") if isinstance(data.get("gw"), dict) else {}
+            # the engine that actually answered THIS page: gwEngine (round-2 gateway; a
+            # cache hit says which engine filled it), else gwProvider (older gateway:
+            # always Serper). Never the flag we sent.
+            answered_by = gw.get("gwEngine") or ("serper" if gw.get("gwProvider") in ("serper", "cache") else None)
+            modern = "gwEngine" in gw  # a gateway that understands engine/type at all
             if page == 1:
                 if data.get("knowledgeGraph"):
                     extras["knowledgeGraph"] = data["knowledgeGraph"]
@@ -210,23 +216,26 @@ def _serper_search(
                     extras["peopleAlsoAsk"] = data["peopleAlsoAsk"]
                 if data.get("relatedSearches"):
                     extras["relatedSearches"] = data["relatedSearches"]
-                gw = data.get("gw") if isinstance(data.get("gw"), dict) else {}
                 if gw:
-                    extras["gw"] = {k: v for k, v in gw.items()
-                                    if k in ("gwEngine", "gwSerperError", "gwProvider", "gwGotoExpiresAt")}
-                # the engine that actually answered: gwEngine (this round's gateway), else
-                # gwProvider (older gateway: always Serper). Never the flag we sent.
-                answered_by = gw.get("gwEngine") or ("serper" if gw.get("gwProvider") in ("serper", "cache") else None)
+                    extras["gw"] = {k: v for k, v in gw.items() if k in ("gwEngine", "gwSerperError", "gwProvider")}
                 if is_gateway() and gw:
-                    if engine == "firecrawl" and answered_by != "firecrawl":
+                    if engine == "firecrawl" and not modern:
                         return [], time.time() - start, ("this gateway does not support --engine firecrawl yet "
                                                          "(it answered with Serper); update the gateway"), requests_made, gl, hl, {}
                     sp = data.get("searchParameters") if isinstance(data.get("searchParameters"), dict) else {}
-                    if news and sp.get("type") != "news" and not data.get("news"):
+                    served_type = gw.get("gwType") or sp.get("type") or ("news" if data.get("news") else None)
+                    if news and served_type != "news":
                         return [], time.time() - start, ("this gateway does not support --news yet "
                                                          "(it answered with web results); update the gateway"), requests_made, gl, hl, {}
                 if answered_by:
                     extras.setdefault("gw", {})["gwEngine"] = answered_by
+            # tickets on this page expire when the gateway says (gwGotoExpiresAt; an older
+            # gateway gives only gwFetchedAt: + its 2 h registry TTL). The listing keeps the
+            # EARLIEST across pages; a ticket page with no usable stamp makes the whole
+            # listing uncacheable (None, never "now + 2 h")
+            if gw.get("gwGoto") or any(is_goto((it or {}).get("link")) for it in data.get("organic") or [] if isinstance(it, dict)):
+                exp = page_goto_expiry(gw)
+                extras["goto_expires_at"] = min_expiry(extras.get("goto_expires_at", "unset"), exp)
 
             organic = data.get("organic") or (data.get("news") if news else None) or []
             if not organic:
@@ -271,6 +280,9 @@ def _serper_search(
                     break
 
             if page_added == 0:
+                break
+            if answered_by == "firecrawl":
+                # Firecrawl search has no pages: what it gave is all there is
                 break
 
             page += 1
@@ -333,39 +345,50 @@ def shown_url(item: dict) -> str:
     return item.get("url", "")
 
 
-GOTO_LISTING_TTL = 2 * 3600  # the gateway's ticket registry TTL, for entries that carry no expiry
+GOTO_LISTING_TTL = 2 * 3600  # the gateway's ticket registry TTL
+EXPIRY_MARGIN = 300
+
+
+def iso_ts(value: Any) -> Optional[float]:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return None
+
+
+def page_goto_expiry(gw: dict) -> Optional[str]:
+    """When this page's tickets die, per the gateway: gwGotoExpiresAt, else gwFetchedAt +
+    the registry TTL (older gateway). None when the gateway gave no usable stamp."""
+    if iso_ts(gw.get("gwGotoExpiresAt")) is not None:
+        return gw["gwGotoExpiresAt"]
+    fetched = iso_ts(gw.get("gwFetchedAt"))
+    if fetched is None:
+        return None
+    return datetime.fromtimestamp(fetched + GOTO_LISTING_TTL, tz=timezone.utc).isoformat(timespec="seconds")
+
+
+def min_expiry(current: Any, new: Optional[str]) -> Optional[str]:
+    """Earliest of two expiries; None (unknown) wins over anything; "unset" means no page yet."""
+    if current == "unset":
+        return new
+    if current is None or new is None:
+        return None
+    return new if iso_ts(new) < iso_ts(current) else current
 
 
 def listing_still_usable(cached: dict) -> bool:
     """A cached listing with goto tickets is only good while the gateway still knows the
-    tickets (their g: ids 404 afterwards). Listings without tickets live the full TTL."""
+    tickets (their g: ids 404 afterwards): until the gateway's own expiry stamp, less a
+    margin. No stamp (an entry from before stamps, or a page the gateway did not date)
+    means the age cannot be established: not served. Listings without tickets live the
+    full cache TTL."""
     results = cached.get("results") or []
     if not any(isinstance(r, dict) and (r.get("goto") or is_goto(r.get("url"))) for r in results):
         return True
-    exp = cached.get("goto_expires_at")
-    if isinstance(exp, str) and exp:
-        try:
-            return datetime.fromisoformat(exp).timestamp() - 300 > time.time()
-        except ValueError:
-            return False
-    # entries from before the gateway sent an expiry: trust them for the registry TTL
-    # measured from when WE fetched them (an upper bound on their age)
-    fetched = cached.get("fetched_at")
-    if isinstance(fetched, (int, float)):
-        return time.time() - fetched < GOTO_LISTING_TTL - 300
-    return False
-
-
-def read_search_cache(key: str) -> Optional[dict]:
-    """The local search cache entry, with the file's mtime as fetched_at for entries
-    written before that field existed."""
-    cached = read_cache("search", key)
-    if cached and "fetched_at" not in cached:
-        try:
-            cached["fetched_at"] = get_cache_path("search", key).stat().st_mtime
-        except OSError:
-            pass
-    return cached
+    exp = iso_ts(cached.get("goto_expires_at"))
+    return exp is not None and exp - EXPIRY_MARGIN > time.time()
 
 
 def goto_ref(item: dict) -> str:
@@ -525,7 +548,7 @@ def search(
     cached_data = None
     from_cache = False
     if not no_cache:
-        cached = read_search_cache(key)
+        cached = read_cache("search", key)
         if cached and listing_still_usable(cached):
             cached_data = cached
             from_cache = True
@@ -570,9 +593,9 @@ def search(
             "results": results,
             "elapsed": elapsed,
             # tickets and their g: ids die with the gateway's registry: the gateway says
-            # when; a listing with tickets is not served from this cache past that
-            "goto_expires_at": (extras.get("gw") or {}).get("gwGotoExpiresAt"),
-            "fetched_at": time.time(),
+            # when (earliest across pages); a listing with tickets is not served from this
+            # cache past that
+            "goto_expires_at": extras.pop("goto_expires_at", None),
             "engine": (extras.get("gw") or {}).get("gwEngine") or engine,
             "gl": gl,
             "hl": hl,
