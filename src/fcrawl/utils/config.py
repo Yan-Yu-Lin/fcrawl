@@ -120,12 +120,23 @@ def check_gateway_url(api_url: str) -> str:
     https:// always; http:// only to loopback, RFC1918/ULA, 100.64.0.0/10 (tailnet)
     and .local/.lan/.ts.net names. Anything else would put the Bearer token on the
     wire in clear text, so refuse before the first byte is sent."""
-    parsed = urlparse(str(api_url))
+    text = str(api_url)
+    # urlparse and requests/urllib3 split a URL differently when it holds a
+    # backslash, whitespace or control characters ("http://evil\\@localhost" is
+    # localhost to one and evil to the other): refuse those outright, and refuse
+    # userinfo so "@" can never move the real host
+    if any(ord(c) < 0x21 or ord(c) == 0x7F for c in text) or "\\" in text:
+        raise InsecureGatewayURL("refusing to send the gateway token: api_url contains whitespace, control "
+                                 "characters or a backslash; set api_url to a plain https://host URL")
+    parsed = urlparse(text)
+    if "@" in (parsed.netloc or ""):
+        raise InsecureGatewayURL("refusing to send the gateway token: api_url must not contain user:password@; "
+                                 "set api_url to a plain https://host URL")
     scheme = (parsed.scheme or "").lower()
     if scheme == "https":
-        return str(api_url).rstrip("/")
+        return text.rstrip("/")
     if scheme == "http" and _is_private_host(parsed.hostname or ""):
-        return str(api_url).rstrip("/")
+        return text.rstrip("/")
     raise InsecureGatewayURL(
         f"refusing to send the gateway token over {scheme or 'an unknown scheme'}:// to "
         f"{parsed.hostname or api_url!r}; set api_url to https://… (plain http is only allowed for "

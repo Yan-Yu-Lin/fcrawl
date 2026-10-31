@@ -28,6 +28,28 @@ from .utils.config import InsecureGatewayURL, check_gateway_url, is_gateway, loa
 
 console = Console()
 
+# subcommands that talk to the gateway in gateway mode (with the family token)
+GATEWAY_COMMANDS = {"scrape", "crawl", "map", "extract", "search", "x", "reddit", "dcard"}
+
+
+def _guard_gateway_url(cmd: click.Command) -> None:
+    """Fail a gateway-bound command early, with one clear message, if the configured
+    gateway URL would put the token on the wire in clear text. Wraps invoke(), which
+    click only reaches after parsing, so `--help` (handled during parsing) and the
+    other commands are untouched. utils/config.py checks again on every request."""
+    original = cmd.invoke
+
+    def invoke(ctx: click.Context):
+        config = load_config()
+        if is_gateway(config):
+            try:
+                check_gateway_url(config["api_url"])
+            except InsecureGatewayURL as exc:
+                raise click.ClickException(str(exc)) from None
+        return original(ctx)
+
+    cmd.invoke = invoke  # type: ignore[method-assign]
+
 
 @click.group(invoke_without_command=True)
 @click.pass_context
@@ -61,14 +83,6 @@ def cli(ctx):
     """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
-        return
-    config = load_config()
-    # `config` only shows settings (masked) and sends nothing: keep it usable to fix a bad URL
-    if is_gateway(config) and ctx.invoked_subcommand != "config":
-        try:
-            check_gateway_url(config["api_url"])
-        except InsecureGatewayURL as exc:
-            raise click.ClickException(str(exc)) from None
 
 
 # Register commands
@@ -103,6 +117,11 @@ def config():
         console.print(f"  {key}: {value}")
 
 
+for _name in GATEWAY_COMMANDS:
+    if _name in cli.commands:
+        _guard_gateway_url(cli.commands[_name])
+
+
 # REMOVED: quick is redundant - just use `fcrawl scrape URL`
 # @cli.command()
 # @click.argument('url')
@@ -112,3 +131,4 @@ def config():
 
 if __name__ == "__main__":
     cli()
+

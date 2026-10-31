@@ -190,6 +190,8 @@ def test_sec14_gateway_url_allowed(url):
 @pytest.mark.parametrize("url", [
     "http://fcrawl.arthurlin.dev", "http://125.229.144.147:3800", "http://8.8.8.8", "http://example.com.evil",
     "http://jason.ts.net.evil.com", "ftp://192.168.1.120", "fcrawl.arthurlin.dev",
+    "http://public.example\\@localhost:3800", "http://evil.com@localhost:3800", "http://user:pw@192.168.1.120:3800",
+    "http://localhost:3800\tevil", "https://evil.com\\@fcrawl.arthurlin.dev",
 ])
 def test_sec14_gateway_url_refused(url):
     from fcrawl.utils.config import InsecureGatewayURL, check_gateway_url
@@ -218,3 +220,17 @@ def test_sec14_cli_refuses_before_any_request(tmp_path, monkeypatch):
     from fcrawl.utils.config import InsecureGatewayURL, gateway_headers
     with pytest.raises(InsecureGatewayURL):
         gateway_headers({"api_url": "http://fcrawl.arthurlin.dev", "gateway_token": "fgw_test_x"})
+
+
+def test_sec14_local_commands_and_help_still_work(tmp_path, monkeypatch):
+    from fcrawl.cli import cli
+
+    rc = tmp_path / ".fcrawlrc"
+    rc.write_text(json.dumps({"api_url": "http://fcrawl.arthurlin.dev", "gateway_token": "fgw_test_x"}))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    for args in (["config"], ["cache", "--help"], ["yt-transcript", "--help"], ["scrape", "--help"]):
+        result = CliRunner().invoke(cli, args)
+        assert result.exit_code == 0, (args, result.output)
+    result = CliRunner().invoke(cli, ["scrape", "https://example.com"])
+    assert result.exit_code != 0 and "https://" in result.output
