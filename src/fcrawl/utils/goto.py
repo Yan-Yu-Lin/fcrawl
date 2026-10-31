@@ -104,18 +104,29 @@ def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
             raise RuntimeError(message)
         if not isinstance(payload, dict) or not isinstance(payload.get("urls"), list):
             raise RuntimeError("gateway resolve returned an unexpected response")
+        # every row must be well-formed, answer a ticket of THIS chunk, and answer it once:
+        # anything else is a broken gateway, not a ticket that silently went missing
+        answers: dict[str, dict] = {}
         for row in payload["urls"]:
-            # every row must be well-formed: a malformed one is a broken gateway, not a
-            # ticket that silently went missing
             if not isinstance(row, dict) or not isinstance(row.get("url"), str) \
-                    or row.get("status") not in ("ok", "cooldown", "failed") \
-                    or (row["status"] == "ok") != isinstance(row.get("resolved"), str):
+                    or row.get("status") not in ("ok", "cooldown", "failed"):
                 raise RuntimeError("gateway resolve returned a malformed row")
-            out[row["url"]] = {"resolved": row.get("resolved") if row["status"] == "ok" else None,
-                               "status": row["status"]}
-        missing = [u for u in chunk if u not in out]
+            resolved = row.get("resolved")
+            if row["status"] == "ok":
+                if not isinstance(resolved, str) or not resolved.strip():
+                    raise RuntimeError("gateway resolve returned a malformed row")
+            elif resolved is not None:
+                raise RuntimeError("gateway resolve returned a malformed row")
+            if row["url"] not in chunk:
+                raise RuntimeError("gateway resolve answered for a ticket that was not asked")
+            if row["url"] in answers:
+                raise RuntimeError("gateway resolve answered the same ticket twice")
+            answers[row["url"]] = {"resolved": resolved if row["status"] == "ok" else None,
+                                   "status": row["status"]}
+        missing = [u for u in chunk if u not in answers]
         if missing:
             raise RuntimeError(f"gateway resolve answered nothing for {len(missing)} ticket(s)")
+        out.update(answers)
     return out
 
 

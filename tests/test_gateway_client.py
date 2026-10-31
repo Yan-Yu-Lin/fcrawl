@@ -639,3 +639,82 @@ def test_r4_malformed_resolve_rows_are_errors(monkeypatch, tmp_path, body):
     out = CliRunner().invoke(cli, ["resolve", "--json", GOTO + "a"])
     assert out.exit_code == 1, out.output
     assert "not_a_ticket" not in out.output and "Traceback" not in out.output
+
+
+# --- astra round 5 ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("body", [
+    {"urls": [{"url": GOTO + "a", "status": "ok", "resolved": ""}]},  # empty resolution
+    {"urls": [{"url": GOTO + "a", "status": "ok", "resolved": "   "}]},
+    {"urls": [{"url": GOTO + "a", "status": "cooldown", "resolved": {}}]},  # non-ok with a value
+    {"urls": [{"url": GOTO + "a", "status": "failed", "resolved": 123}]},
+    {"urls": [{"url": GOTO + "a", "status": "failed", "resolved": None},
+              {"url": GOTO + "a", "status": "ok", "resolved": "https://x"}]},  # answered twice
+    {"urls": [{"url": GOTO + "a", "status": "ok", "resolved": "https://x"},
+              {"url": GOTO + "zzz", "status": "ok", "resolved": "https://y"}]},  # unrequested
+])
+def test_r5_invalid_resolved_values_and_duplicate_rows_are_errors(monkeypatch, tmp_path, body):
+    """#2/#3: an ok row needs a non-blank resolved string, a non-ok row must not carry one,
+    and a ticket may be answered once and only if it was asked."""
+    from fcrawl.cli import cli
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return body
+
+    monkeypatch.setattr(g.requests, "post", lambda *a, **k: R())
+    with pytest.raises(RuntimeError):
+        g.resolve_via_gateway([GOTO + "a"])
+    out = CliRunner().invoke(cli, ["resolve", "--json", GOTO + "a"])
+    assert out.exit_code == 1, out.output
+    assert "not_a_ticket" not in out.output and "Traceback" not in out.output
+
+
+def test_r5_missing_answers_checked_per_chunk(monkeypatch, tmp_path):
+    """#3: an unsolicited answer for a later chunk's ticket in chunk 1 must not let an empty
+    chunk-2 response pass the missing-answer check."""
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    tickets = [GOTO + f"t{i}" for i in range(7)]  # 6 + 1 -> two chunks
+    calls = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, rows):
+            self.rows = rows
+
+        def json(self):
+            return {"urls": self.rows}
+
+    def post(url, json=None, **kw):
+        calls.append(list(json["urls"]))
+        if len(calls) == 1:
+            rows = [{"url": u, "status": "ok", "resolved": f"https://real/{i}"} for i, u in enumerate(json["urls"])]
+            rows.append({"url": tickets[6], "status": "ok", "resolved": "https://real/sneaky"})
+            return R(rows)
+        return R([])
+
+    monkeypatch.setattr(g.requests, "post", post)
+    with pytest.raises(RuntimeError):
+        g.resolve_via_gateway(tickets)
+    assert len(calls) == 1 and calls[0] == tickets[:6]  # chunk 1 already rejected
+    # honest two-chunk flow still works
+    calls.clear()
+
+    def honest(url, json=None, **kw):
+        calls.append(list(json["urls"]))
+        return R([{"url": u, "status": "ok", "resolved": f"https://real/{u[-2:]}"} for u in json["urls"]])
+
+    monkeypatch.setattr(g.requests, "post", honest)
+    out = g.resolve_via_gateway(tickets)
+    assert len(calls) == 2 and set(out) == set(tickets) and all(v["status"] == "ok" for v in out.values())
