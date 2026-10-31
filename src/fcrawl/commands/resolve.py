@@ -41,8 +41,12 @@ def resolve(urls: tuple[str, ...], wait: bool, json_output: bool):
             rows.append({"url": u, "resolved": a.get("resolved"), "status": a.get("status", "failed")})
         else:
             rows.append({"url": u, "resolved": u, "status": "not_a_ticket"})
+    failed = sum(1 for r in rows if r["status"] == "failed")
+    pending = sum(1 for r in rows if r["status"] == "cooldown")
     if json_output:
         console.print_json(json.dumps(rows, indent=2))
+        if failed:
+            raise SystemExit(1)
         return
     for row in rows:
         status = row["status"]
@@ -54,11 +58,9 @@ def resolve(urls: tuple[str, ...], wait: bool, json_output: bool):
             print(f"[goto pending] {row['url'][:80]}…  (cooling down; retry, or --wait)")
         else:
             print(f"[goto failed] {row['url'][:80]}…")
-    pending = sum(1 for r in rows if r["status"] == "cooldown")
-    failed = sum(1 for r in rows if r["status"] == "failed")
     if pending or failed:
         console.print(f"[dim]{pending} pending, {failed} failed[/dim]")
         if pending and not wait:
             console.print("[dim]Tip: fcrawl scrape <ticket> resolves on use (waits if it must), or rerun with --wait[/dim]")
-    if failed and not pending:
+    if failed:
         raise SystemExit(1)

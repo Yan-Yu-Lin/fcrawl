@@ -416,3 +416,80 @@ def test_goto_direct_mode_redeem(monkeypatch):
     assert g.direct_redeem(GOTO + "a") == (None, 19)
     monkeypatch.setattr(g.requests, "get", lambda *a, **k: R(200, text="<html></html>"))
     assert g.direct_redeem(GOTO + "a") == (None, None)
+
+
+# --- astra round 1 ---------------------------------------------------------------
+
+
+def test_r1_client_google_host_rule():
+    from fcrawl.utils.goto import is_google_host, is_goto
+
+    assert is_goto("https://www.google.com./goto?url=1") and is_goto("https://news.google.com/goto/?url=1")
+    assert not is_goto("https://google.bad.com/goto?url=1")
+    assert is_google_host("google.com.tw") and not is_google_host("evilgoogle.com")
+
+
+def test_r1_resolve_exit_code_on_failure(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import resolve as rmod
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(rmod, "resolve_via_gateway", lambda urls, wait=False: {
+        GOTO + "a": {"resolved": None, "status": "failed"}, GOTO + "b": {"resolved": None, "status": "cooldown"}})
+    assert CliRunner().invoke(cli, ["resolve", GOTO + "a", GOTO + "b"]).exit_code == 1
+    assert CliRunner().invoke(cli, ["resolve", GOTO + "a", "--json"]).exit_code == 1
+    monkeypatch.setattr(rmod, "resolve_via_gateway", lambda urls, wait=False: {GOTO + "b": {"resolved": None, "status": "cooldown"}})
+    assert CliRunner().invoke(cli, ["resolve", GOTO + "b"]).exit_code == 0
+
+
+def test_r1_pretty_output_keeps_goto_marker(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 1, "organic": [{"title": "A", "link": GOTO + "a", "snippet": "s", "position": 1, "gwGoto": True},
+                                               {"title": "B", "link": GOTO + "b", "snippet": "s", "position": 2, "gwGoto": True,
+                                                "displayedLink": "https://b.example › p"}]}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
+    out = CliRunner().invoke(cli, ["search", "q", "--no-cache", "--pretty"]).output
+    assert "[goto #1]" in out and "[goto] https://b.example › p" in out
+
+
+def test_r1_resolve_chunks_of_six(monkeypatch, tmp_path):
+    from fcrawl.utils import goto as g
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    sizes = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, urls):
+            self._urls = urls
+
+        def json(self):
+            return {"urls": [{"url": u, "resolved": None, "status": "cooldown"} for u in self._urls]}
+
+    def post(url, json=None, headers=None, timeout=None):
+        sizes.append((len(json["urls"]), timeout))
+        return R(json["urls"])
+
+    monkeypatch.setattr(g.requests, "post", post)
+    out = g.resolve_via_gateway([GOTO + str(i) for i in range(14)])
+    assert len(out) == 14 and [n for n, _ in sizes] == [6, 6, 2]
+
+
+def test_r1_goto_unresolved_message_reaches_user():
+    from fcrawl.utils.config import gateway_error_message
+
+    exc = Exception("Unexpected error during scrape: Status code 502. goto_unresolved: the Google goto link could not be resolved yet - No additional error details provided.")
+    assert gateway_error_message(exc).startswith("goto_unresolved: the Google goto link could not be resolved yet")

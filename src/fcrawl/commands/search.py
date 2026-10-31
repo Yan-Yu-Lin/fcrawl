@@ -245,10 +245,11 @@ def _display_results(results: list[dict]):
         url = shown_url(item)
         description = item.get("description", "")
 
-        console.print(f"[bold cyan]## {title}[/bold cyan]")
-        console.print(f"[blue]{url}[/blue]")
+        console.print(f"## {title}", style="bold cyan", markup=False)
+        # markup off: "[goto]" / "[goto #3]" would otherwise be eaten as Rich tags
+        console.print(url, style="blue", markup=False)
         if description:
-            console.print(description)
+            console.print(description, markup=False)
         console.print()
 
     console.print("=" * 60)

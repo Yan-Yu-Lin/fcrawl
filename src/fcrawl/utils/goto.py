@@ -18,10 +18,22 @@ import requests
 
 from .config import gateway_headers, gateway_url, is_gateway, load_config
 
-GOTO_HOST_RE = re.compile(r"^(www\.)?google\.(?:[a-z]{2,3}\.)?[a-z]{2,3}$")
-RESOLVE_TIMEOUT = 20  # /gw/resolve without wait answers in a few seconds
-RESOLVE_WAIT_TIMEOUT = 75  # with wait:true the gateway may hold ~45 s for Serper
+# same rule as the gateway (fcrawl_gw/goto.py): google.<cc>, google.<gtld> or
+# google.<sld>.<cc>, any subdomain, trailing dot ignored; google.bad.com is not Google
+GOOGLE_DOMAIN_RE = re.compile(r"^google\.(?:com|net|org|[a-z]{2}|(?:com|co|org|net|ne|or|ac)\.[a-z]{2})$")
+# the gateway resolves at most this many tickets per call within its own 15 s / 65 s budget
+RESOLVE_TIMEOUT = 20  # /gw/resolve without wait
+RESOLVE_WAIT_TIMEOUT = 75  # with wait: the gateway may hold ~45 s for Serper on one ticket
 MAX_RESOLVE_URLS = 20
+RESOLVE_CHUNK = 6  # tickets per /gw/resolve call: the gateway works 6 at a time
+
+
+def is_google_host(host: Any) -> bool:
+    if not isinstance(host, str):
+        return False
+    h = host.strip().rstrip(".").lower()
+    labels = h.split(".")
+    return any(GOOGLE_DOMAIN_RE.match(".".join(labels[i:])) for i in range(len(labels)))
 
 
 def is_goto(url: Any) -> bool:
@@ -31,8 +43,7 @@ def is_goto(url: Any) -> bool:
         p = urlsplit(url)
     except ValueError:
         return False
-    return p.scheme in ("http", "https") and bool(p.hostname) and bool(GOTO_HOST_RE.match(p.hostname)) \
-        and p.path == "/goto"
+    return p.scheme in ("http", "https") and is_google_host(p.hostname) and p.path.rstrip("/") == "/goto"
 
 
 def goto_label(index: int, displayed: Optional[str] = None, pending: bool = False) -> str:
@@ -56,8 +67,8 @@ def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
     if not is_gateway(config):
         raise RuntimeError("fcrawl resolve needs gateway mode (gateway_token in .fcrawlrc)")
     out: dict[str, dict] = {}
-    for i in range(0, len(urls), MAX_RESOLVE_URLS):
-        chunk = urls[i:i + MAX_RESOLVE_URLS]
+    for i in range(0, len(urls), RESOLVE_CHUNK):
+        chunk = urls[i:i + RESOLVE_CHUNK]
         resp = requests.post(
             f"{gateway_url(config)}/gw/resolve",
             json={"urls": chunk, "wait": wait},
