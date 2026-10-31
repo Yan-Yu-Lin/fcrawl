@@ -5,7 +5,7 @@ import time
 import random
 import platform
 from pathlib import Path
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from typing import Optional
 from urllib.parse import quote_plus
 

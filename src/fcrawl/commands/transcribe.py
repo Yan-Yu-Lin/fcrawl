@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import click
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 
 from ..utils.output import handle_output, console
 

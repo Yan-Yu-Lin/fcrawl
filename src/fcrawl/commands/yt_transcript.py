@@ -16,7 +16,7 @@ from typing import Any, Optional, cast
 
 import click
 import yt_dlp
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 
 from ..utils.output import handle_output, console
 from ..utils.config import load_config

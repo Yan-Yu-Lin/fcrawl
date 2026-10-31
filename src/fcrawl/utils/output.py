@@ -1,18 +1,60 @@
 """Output handling utilities for fcrawl"""
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.progress import Progress as _RichProgress
+from rich.progress import SpinnerColumn, TextColumn
 from rich.syntax import Syntax
 from rich.table import Table
 from rich import print as rprint
 import pyperclip
 
 console = Console()
+
+
+def force_utf8_stdio() -> None:
+    """Make stdout/stderr UTF-8 whatever the locale (Windows zh-TW: cp950). rich's
+    spinner glyphs, CJK titles and emoji otherwise raise UnicodeEncodeError as soon as
+    the output is piped (which is how an agent always runs us). Idempotent; a stream
+    that cannot be reconfigured (replaced by a test harness) is left alone."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if enc == "utf8":
+            continue
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+
+
+def progress_enabled() -> bool:
+    """Spinners only on an interactive terminal. Piped (an agent, `| more`, `> file`)
+    they are noise in the captured text, and on a cp950 console they crash rich."""
+    if os.environ.get("FCRAWL_NO_PROGRESS"):
+        return False
+    try:
+        return sys.stderr.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+class Progress(_RichProgress):
+    """rich Progress that is silent when stderr is not a terminal. Every command's
+    spinner goes through this class (same constructor as rich's)."""
+
+    def __init__(self, *columns, **kwargs):
+        if not progress_enabled():
+            kwargs["disable"] = True
+        super().__init__(*columns, **kwargs)
 
 
 def extract_markdown_links(content: str) -> List[str]:
@@ -65,7 +107,12 @@ def resolve_pretty(pretty: Optional[bool]) -> bool:
 def display_content(content: Any, format_type: str = "markdown", pretty: bool = True):
     """Display content in the terminal with formatting"""
     if not pretty or not sys.stdout.isatty():
-        # Plain output for pipes or non-interactive
+        # Plain output for pipes or non-interactive; a list of links is one URL per
+        # line (grep / Select-String friendly), never a Python list repr
+        if format_type == "links" and isinstance(content, list):
+            for link in content:
+                print(link if isinstance(link, str) else (link.get("url", str(link)) if isinstance(link, dict) else str(link)))
+            return
         print(content)
         return
 
@@ -103,16 +150,22 @@ def save_to_file(content: Any, filepath: str, format_type: str = "markdown"):
     path.parent.mkdir(parents=True, exist_ok=True)
 
     if format_type == "json":
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             if isinstance(content, str):
                 f.write(content)
             else:
                 json.dump(content, f, indent=2)
     else:
-        with open(path, "w") as f:
-            f.write(str(content))
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(links_text(content) if format_type == "links" else str(content))
 
     console.print(f"[green]✓ Saved to {filepath}[/green]")
+
+
+def links_text(content: Any) -> str:
+    if isinstance(content, list):
+        return "\n".join(l if isinstance(l, str) else (l.get("url", str(l)) if isinstance(l, dict) else str(l)) for l in content) + ("\n" if content else "")
+    return str(content)
 
 
 def copy_to_clipboard(content: Any):
@@ -184,14 +237,14 @@ def handle_output(
             path = Path(output_file)
             path.parent.mkdir(parents=True, exist_ok=True)
             if format_type == "json":
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     if isinstance(output_content, str):
                         f.write(output_content)
                     else:
                         json.dump(output_content, f, indent=2)
             else:
-                with open(path, "w") as f:
-                    f.write(str(output_content))
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(links_text(output_content) if format_type == "links" else str(output_content))
 
     if copy:
         copy_to_clipboard(output_content)

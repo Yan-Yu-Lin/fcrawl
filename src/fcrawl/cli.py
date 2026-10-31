@@ -6,7 +6,12 @@ Simple web scraping from your terminal
 
 import click
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+
+from .utils.output import force_utf8_stdio
+
+# before anything prints: on a cp950 (zh-TW Windows) console, piped output would
+# otherwise raise UnicodeEncodeError on the first non-ASCII character
+force_utf8_stdio()
 
 from .commands.scrape import scrape
 from .commands.resolve import resolve

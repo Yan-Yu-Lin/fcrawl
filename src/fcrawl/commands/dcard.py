@@ -17,7 +17,7 @@ from urllib.parse import urlencode
 
 import click
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import firecrawl_call
@@ -509,9 +509,9 @@ def dcard_post(url_or_ids, limit, sort, replies, no_comments, parallel, output, 
             path.write_text(json.dumps(
                 {"post": post_to_dict(post), "comments": [comment_to_dict(c) for c in comments]},
                 ensure_ascii=False, indent=2 if pretty else None,
-            ))
+            ), encoding="utf-8")
         else:
-            path.write_text(render_post(post, comments, limit > 0 and len(comments) >= limit))
+            path.write_text(render_post(post, comments, limit > 0 and len(comments) >= limit), encoding="utf-8")
         p = post_to_dict(post)
         print(f"RESULT path={path} id={post_id} likes={p['likes']} comments={p['comment_count']} title={one_line(p['title'])}")
     if failed:

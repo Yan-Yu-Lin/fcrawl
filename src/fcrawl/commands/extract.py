@@ -2,7 +2,7 @@
 
 import click
 import json
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from typing import Optional, List
 
@@ -59,7 +59,7 @@ def extract(
     # Load schema if provided
     if schema:
         try:
-            with open(schema, "r") as f:
+            with open(schema, "r", encoding="utf-8") as f:
                 schema_data = json.load(f)
                 extract_options["schema"] = schema_data
         except Exception as e:

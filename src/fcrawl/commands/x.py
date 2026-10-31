@@ -8,7 +8,7 @@ from typing import Optional
 
 import click
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from twscrape import NoAccountError, Tweet, User

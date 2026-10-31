@@ -5,13 +5,9 @@ import click
 import time
 from typing import Optional
 
-from rich.progress import (
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    BarColumn,
-    TaskProgressColumn,
-)
+from rich.progress import SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+
+from ..utils.output import Progress
 from rich.table import Table
 
 from ..utils.output import handle_output, console, resolve_pretty

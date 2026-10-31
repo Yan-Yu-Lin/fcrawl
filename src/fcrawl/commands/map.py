@@ -1,7 +1,7 @@
 """Map command for fcrawl"""
 
 import click
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from rich.console import Console
 from typing import Optional
 

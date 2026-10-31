@@ -5,7 +5,9 @@ import click
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+from rich.progress import BarColumn, TextColumn, TimeRemainingColumn
+
+from ..utils.output import Progress
 from rich.console import Console
 from typing import Optional, List
 
@@ -73,7 +75,7 @@ def write_page_md(output_dir: Path, page, no_links: bool) -> str:
             md = strip_links(md)
         lines.append(md)
 
-    filepath.write_text('\n'.join(lines))
+    filepath.write_text('\n'.join(lines), encoding="utf-8")
     return filename
 
 
@@ -103,7 +105,7 @@ def write_index_md(output_dir: Path, pages: list, crawl_url: str, depth: Optiona
         lines.append(f"- [{title}](./{filename})")
 
     filepath = output_dir / 'index.md'
-    filepath.write_text('\n'.join(lines))
+    filepath.write_text('\n'.join(lines), encoding="utf-8")
 
 
 @click.command()

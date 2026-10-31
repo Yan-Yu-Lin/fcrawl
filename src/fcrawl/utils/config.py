@@ -57,7 +57,7 @@ def load_config() -> Dict[str, Any]:
     config_path = get_config_path()
     if config_path.exists():
         try:
-            with open(config_path, "r") as f:
+            with open(config_path, "r", encoding="utf-8") as f:
                 file_config = json.load(f)
                 config.update(file_config)
         except Exception as exc:
@@ -195,7 +195,7 @@ def get_twitterapi_io_key() -> str:
 def save_config(config: Dict[str, Any], path: Optional[Path] = None):
     """Save configuration to file"""
     config_path = path or get_config_path()
-    with open(config_path, "w") as f:
+    with open(config_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
 

@@ -13,7 +13,7 @@ from typing import Any, Optional
 import click
 from rich.console import Console
 from rich.markup import escape
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from ..utils.cache import cache_key, read_cache, write_cache

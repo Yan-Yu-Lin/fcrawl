@@ -6,7 +6,7 @@ from typing import Optional
 
 import click
 import yt_dlp
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from ..utils.output import console, copy_to_clipboard
@@ -251,7 +251,7 @@ def yt_search(
         output_text = "\n".join(v["id"] for v in result["videos"])
 
         if output:
-            with open(output, "w") as f:
+            with open(output, "w", encoding="utf-8") as f:
                 f.write(output_text)
             console.print(f"[green]Saved to {output}[/green]")
         else:
@@ -265,7 +265,7 @@ def yt_search(
         output_text = json.dumps(result, indent=2, ensure_ascii=False)
 
         if output:
-            with open(output, "w") as f:
+            with open(output, "w", encoding="utf-8") as f:
                 f.write(output_text)
             console.print(f"[green]Saved to {output}[/green]")
         else:
@@ -323,7 +323,7 @@ def yt_search(
         print(plain_output)
 
     if output:
-        with open(output, "w") as f:
+        with open(output, "w", encoding="utf-8") as f:
             f.write(plain_output)
         console.print(f"[green]Saved to {output}[/green]")
 

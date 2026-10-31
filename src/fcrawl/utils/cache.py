@@ -66,7 +66,7 @@ def read_cache(command: str, key: str) -> Optional[dict]:
     if ttl and time.time() - path.stat().st_mtime > ttl:
         return None
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, IOError):
         return None
 
@@ -75,7 +75,7 @@ def write_cache(command: str, key: str, data: dict):
     """Write to cache"""
     path = get_cache_path(command, key)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, default=str))
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
 
 
 def clear_cache(command: Optional[str] = None) -> None:
@@ -136,7 +136,7 @@ def iter_cache(command: str) -> Iterator[Tuple[Path, Optional[dict]]]:
         return
     for path in sorted(folder.glob("*.json")):
         try:
-            yield path, json.loads(path.read_text())
+            yield path, json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, IOError):
             yield path, None
 

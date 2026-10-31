@@ -7,7 +7,7 @@ import click
 import requests
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 from types import SimpleNamespace
 from rich.console import Console
 from typing import List, Optional, Tuple

@@ -77,13 +77,13 @@ class KeyPool:
 
     def _load(self) -> dict:
         try:
-            return json.loads(self.state_file.read_text())
+            return json.loads(self.state_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
 
     def _save(self, state: dict) -> None:
         tmp = self.state_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(state))
+        tmp.write_text(json.dumps(state), encoding="utf-8")
         os.replace(tmp, self.state_file)
 
     def _entry(self, state: dict, key: str) -> dict:
@@ -94,7 +94,7 @@ class KeyPool:
 
     def _locked(self, fn: Callable[[dict], T]) -> T:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.lock_file, "a+") as lock, exclusive_lock(lock):
+        with open(self.lock_file, "a+", encoding="utf-8") as lock, exclusive_lock(lock):
             state = self._load()
             now = time.time()
             for entry in state.values():

@@ -6,7 +6,7 @@ from typing import Optional
 
 import click
 import requests
-from rich.progress import Progress, SpinnerColumn, TextColumn
+from ..utils.output import Progress, SpinnerColumn, TextColumn
 
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import load_config
