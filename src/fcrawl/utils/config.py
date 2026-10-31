@@ -93,8 +93,14 @@ def is_gateway(config: Optional[Dict[str, Any]] = None) -> bool:
     return bool(config.get("gateway_token"))
 
 
-class InsecureGatewayURL(RuntimeError):
-    """The gateway token would travel in clear text over the internet."""
+import click as _click
+
+
+class InsecureGatewayURL(_click.ClickException):
+    """The gateway token would travel in clear text over the internet.
+
+    A ClickException so that, wherever it surfaces, click prints the message and
+    exits 1 instead of a traceback; commands that wrap errors still show its text."""
 
 
 _PRIVATE_SUFFIXES = (".local", ".lan", ".ts.net")

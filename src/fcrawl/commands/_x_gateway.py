@@ -20,7 +20,7 @@ from rich.console import Console
 from twscrape import Tweet, User
 from twscrape.models import parse_tweets, parse_users
 
-from ..utils.config import gateway_headers, gateway_url, load_config
+from ..utils.config import InsecureGatewayURL, gateway_headers, gateway_url, load_config
 from ..utils.article_parser import parse_article_from_response
 from ..vendors.twitterapi_io import to_tweet, to_user
 
@@ -42,6 +42,8 @@ def gql(op: str, variables: dict[str, Any], cursor: str | None = None) -> dict:
     try:
         resp = requests.post(f"{gateway_url(config)}/gw/x/gql", json=body,
                              headers=gateway_headers(config), timeout=TIMEOUT)
+    except InsecureGatewayURL as exc:
+        raise GatewayXError(str(exc), cause="insecure_url") from None
     except requests.RequestException as exc:
         raise GatewayXError(f"gateway unreachable: {exc}") from exc
     if resp.status_code != 200:

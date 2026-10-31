@@ -229,8 +229,23 @@ def test_sec14_local_commands_and_help_still_work(tmp_path, monkeypatch):
     rc.write_text(json.dumps({"api_url": "http://fcrawl.arthurlin.dev", "gateway_token": "fgw_test_x"}))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
-    for args in (["config"], ["cache", "--help"], ["yt-transcript", "--help"], ["scrape", "--help"]):
+    for args in (["config"], ["cache", "--help"], ["yt-transcript", "--help"], ["scrape", "--help"],
+                 ["x", "search", "--help"], ["reddit", "search", "--help"], ["dcard", "post", "--help"],
+                 ["cache", "stats"]):
         result = CliRunner().invoke(cli, args)
         assert result.exit_code == 0, (args, result.output)
-    result = CliRunner().invoke(cli, ["scrape", "https://example.com"])
+    import uuid
+    result = CliRunner().invoke(cli, ["scrape", f"https://example.com/never-cached-{uuid.uuid4().hex}"])
     assert result.exit_code != 0 and "https://" in result.output
+
+
+def test_sec14_x_gateway_refuses_with_clear_message(monkeypatch):
+    import requests
+    monkeypatch.setattr(gw, "load_config", lambda: {"api_url": "http://fcrawl.arthurlin.dev", "gateway_token": "fgw_t"})
+
+    def no_network(*a, **k):
+        raise AssertionError("a request was attempted")
+
+    monkeypatch.setattr(requests, "post", no_network)
+    with pytest.raises(gw.GatewayXError, match="https://"):
+        gw.gql("SearchTimeline", {"rawQuery": "a"})
