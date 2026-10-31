@@ -11,7 +11,7 @@ import requests
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from ..utils.cache import cache_key, read_cache, write_cache
+from ..utils.cache import cache_key, get_cache_path, read_cache, write_cache
 from ..utils.config import gateway_url, is_gateway, load_config
 from ..utils.goto import goto_label, is_goto, is_short_id, resolve_via_gateway
 from ..utils.output import console, handle_output, resolve_pretty
@@ -210,8 +210,23 @@ def _serper_search(
                     extras["peopleAlsoAsk"] = data["peopleAlsoAsk"]
                 if data.get("relatedSearches"):
                     extras["relatedSearches"] = data["relatedSearches"]
-                if isinstance(data.get("gw"), dict):
-                    extras["gw"] = {k: v for k, v in data["gw"].items() if k in ("gwEngine", "gwSerperError", "gwProvider")}
+                gw = data.get("gw") if isinstance(data.get("gw"), dict) else {}
+                if gw:
+                    extras["gw"] = {k: v for k, v in gw.items()
+                                    if k in ("gwEngine", "gwSerperError", "gwProvider", "gwGotoExpiresAt")}
+                # the engine that actually answered: gwEngine (this round's gateway), else
+                # gwProvider (older gateway: always Serper). Never the flag we sent.
+                answered_by = gw.get("gwEngine") or ("serper" if gw.get("gwProvider") in ("serper", "cache") else None)
+                if is_gateway() and gw:
+                    if engine == "firecrawl" and answered_by != "firecrawl":
+                        return [], time.time() - start, ("this gateway does not support --engine firecrawl yet "
+                                                         "(it answered with Serper); update the gateway"), requests_made, gl, hl, {}
+                    sp = data.get("searchParameters") if isinstance(data.get("searchParameters"), dict) else {}
+                    if news and sp.get("type") != "news" and not data.get("news"):
+                        return [], time.time() - start, ("this gateway does not support --news yet "
+                                                         "(it answered with web results); update the gateway"), requests_made, gl, hl, {}
+                if answered_by:
+                    extras.setdefault("gw", {})["gwEngine"] = answered_by
 
             organic = data.get("organic") or (data.get("news") if news else None) or []
             if not organic:
@@ -316,6 +331,41 @@ def shown_url(item: dict) -> str:
         return goto_label(item.get("position", 0), displayed=item.get("displayed"),
                           pending=item.get("goto_pending", False))
     return item.get("url", "")
+
+
+GOTO_LISTING_TTL = 2 * 3600  # the gateway's ticket registry TTL, for entries that carry no expiry
+
+
+def listing_still_usable(cached: dict) -> bool:
+    """A cached listing with goto tickets is only good while the gateway still knows the
+    tickets (their g: ids 404 afterwards). Listings without tickets live the full TTL."""
+    results = cached.get("results") or []
+    if not any(isinstance(r, dict) and (r.get("goto") or is_goto(r.get("url"))) for r in results):
+        return True
+    exp = cached.get("goto_expires_at")
+    if isinstance(exp, str) and exp:
+        try:
+            return datetime.fromisoformat(exp).timestamp() - 300 > time.time()
+        except ValueError:
+            return False
+    # entries from before the gateway sent an expiry: trust them for the registry TTL
+    # measured from when WE fetched them (an upper bound on their age)
+    fetched = cached.get("fetched_at")
+    if isinstance(fetched, (int, float)):
+        return time.time() - fetched < GOTO_LISTING_TTL - 300
+    return False
+
+
+def read_search_cache(key: str) -> Optional[dict]:
+    """The local search cache entry, with the file's mtime as fetched_at for entries
+    written before that field existed."""
+    cached = read_cache("search", key)
+    if cached and "fetched_at" not in cached:
+        try:
+            cached["fetched_at"] = get_cache_path("search", key).stat().st_mtime
+        except OSError:
+            pass
+    return cached
 
 
 def goto_ref(item: dict) -> str:
@@ -475,8 +525,8 @@ def search(
     cached_data = None
     from_cache = False
     if not no_cache:
-        cached = read_cache("search", key)
-        if cached:
+        cached = read_search_cache(key)
+        if cached and listing_still_usable(cached):
             cached_data = cached
             from_cache = True
             console.print("[dim]Using cached result[/dim]")
@@ -519,6 +569,10 @@ def search(
         cached_data = {
             "results": results,
             "elapsed": elapsed,
+            # tickets and their g: ids die with the gateway's registry: the gateway says
+            # when; a listing with tickets is not served from this cache past that
+            "goto_expires_at": (extras.get("gw") or {}).get("gwGotoExpiresAt"),
+            "fetched_at": time.time(),
             "engine": (extras.get("gw") or {}).get("gwEngine") or engine,
             "gl": gl,
             "hl": hl,

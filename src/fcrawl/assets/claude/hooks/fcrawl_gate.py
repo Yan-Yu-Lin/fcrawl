@@ -24,14 +24,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 import re
 import sys
 import time
 
 SKILL = "fcrawl"
-SKILL_FILE = pathlib.Path.home() / ".claude" / "skills" / SKILL / "SKILL.md"
-STATE_DIR = pathlib.Path.home() / ".claude" / "state" / "fcrawl-gate"
+# the same directory `fcrawl setup claude-code` installed into (CLAUDE_CONFIG_DIR is
+# what Claude Code itself honours; the hook inherits its environment)
+CLAUDE_DIR = pathlib.Path(os.environ.get("CLAUDE_CONFIG_DIR") or (pathlib.Path.home() / ".claude"))
+SKILL_FILE = CLAUDE_DIR / "skills" / SKILL / "SKILL.md"
+STATE_DIR = CLAUDE_DIR / "state" / "fcrawl-gate"
 GATED_TOOLS = {"WebSearch", "WebFetch"}
 TRACE = (STATE_DIR / "TRACE").exists()
 FCRAWL_CMD = re.compile(r"(^|[\s;&|(`])fcrawl(\s|$)")

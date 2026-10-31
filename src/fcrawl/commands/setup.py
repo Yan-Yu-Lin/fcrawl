@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import sys
 from importlib import resources
@@ -33,13 +34,17 @@ from ..utils.output import console
 GATE_NAME = "fcrawl_gate.py"
 SKILL_NAME = "fcrawl"
 BACKUP_SUFFIX = ".bak-fcrawl-setup"
+CLAUDE_MD_BEGIN = "<!-- fcrawl-setup:begin (managed by `fcrawl setup claude-code`; edits inside are overwritten) -->"
+CLAUDE_MD_END = "<!-- fcrawl-setup:end -->"
 CLAUDE_MD_HEADING = "## fcrawl"
-CLAUDE_MD_SECTION = """
+CLAUDE_MD_SECTION = f"""
+{CLAUDE_MD_BEGIN}
 ## fcrawl — all web access (search, pages, docs, YouTube, Reddit, X, Dcard)
 
 **Never use the built-in WebSearch / WebFetch or any Firecrawl MCP. All web work goes through the `fcrawl` CLI in Bash.** The full usage guide is the `fcrawl` skill — load it with the Skill tool (`skill: fcrawl`) before any web task; a hook denies WebSearch/WebFetch in any agent that hasn't loaded it yet (subagents load it themselves). The skill holds the hard rules (search results stay in Bash output, `scrape --save-temp`, never `--no-links` on docs, read docs pages fully), every subcommand, and the recipe for navigating API docs (`llms.txt` → `.md` pages).
 
 Usually don't `cat` files in Bash — use the Read tool.
+{CLAUDE_MD_END}
 """
 
 # (event, matcher) -> the gate runs there. Mirrors Arthur's settings.json.
@@ -75,12 +80,25 @@ def python_for_hooks() -> str:
 
 
 def gate_command(gate_path: Path, python: str) -> str:
-    return f"{python} {gate_path}"
+    """Shell-quoted, so a config dir with a space ("~/claude config") still runs."""
+    return f"{shlex.quote(python)} {shlex.quote(str(gate_path))}"
 
 
-def is_gate_hook(hook: Any) -> bool:
-    return isinstance(hook, dict) and hook.get("type") == "command" \
-        and isinstance(hook.get("command"), str) and hook["command"].rstrip().endswith(GATE_NAME)
+def hook_script(hook: Any) -> str | None:
+    """The script a command hook runs: last word of `<python> <script>`; None otherwise."""
+    if not isinstance(hook, dict) or hook.get("type") != "command" or not isinstance(hook.get("command"), str):
+        return None
+    try:
+        words = shlex.split(hook["command"])
+    except ValueError:
+        return None
+    return words[-1] if words else None
+
+
+def is_gate_hook(hook: Any, gate_path: Path) -> bool:
+    """Ours = runs exactly the gate file setup installs (another fcrawl_gate.py elsewhere
+    on the machine is somebody else's)."""
+    return hook_script(hook) == str(gate_path)
 
 
 class Plan:
@@ -112,14 +130,19 @@ class Plan:
         if err:
             self.actions.append(f"settings   ERROR: {err}")
             return
-        new_settings, changed = merge_hooks(settings, gate_command(self.gate_path, self.python))
-        if changed:
-            self.actions.append(f"settings   add {changed} hook entr{'y' if changed == 1 else 'ies'} to {self.settings_path}"
+        new_settings, added, updated = merge_hooks(settings, self.gate_path, gate_command(self.gate_path, self.python))
+        if added or updated:
+            what = []
+            if added:
+                what.append(f"add {added} hook entr{'y' if added == 1 else 'ies'}")
+            if updated:
+                what.append(f"update {updated} command{'' if updated == 1 else 's'}")
+            self.actions.append(f"settings   {', '.join(what)} in {self.settings_path}"
                                 f" (backup: {self.settings_path.name}{BACKUP_SUFFIX})")
         else:
             self.actions.append(f"settings   hooks already present in {self.settings_path}")
         self._new_settings = new_settings
-        self._settings_changed = changed > 0
+        self._settings_changed = (added + updated) > 0
         if self._has_section():
             self.actions.append(f"CLAUDE.md  '{CLAUDE_MD_HEADING}' section already present in {self.claude_md}")
         else:
@@ -150,7 +173,7 @@ class Plan:
         if err:
             self.actions.append(f"settings   ERROR: {err}")
             return
-        new_settings, removed = remove_hooks(settings)
+        new_settings, removed = remove_hooks(settings, self.gate_path)
         self.actions.append(f"settings   remove {removed} gate hook entr{'y' if removed == 1 else 'ies'}"
                             if removed else "settings   no gate hooks present")
         self._new_settings, self._settings_changed = new_settings, removed > 0
@@ -200,27 +223,34 @@ class Plan:
         os.replace(tmp, self.settings_path)
 
     def _has_section(self) -> bool:
+        """Only a block between our own markers counts; a user's '## fcrawl notes' is theirs."""
         if not self.claude_md.exists():
             return False
-        return any(is_our_heading(line) for line in self.claude_md.read_text(encoding="utf-8").splitlines())
+        text = self.claude_md.read_text(encoding="utf-8")
+        return CLAUDE_MD_BEGIN in text and CLAUDE_MD_END in text
 
 
-def merge_hooks(settings: dict, command: str) -> tuple[dict, int]:
-    """Add the gate to each (event, matcher) slot that does not already run it. Other
-    hooks, other matchers and every other setting are left exactly as they are."""
+def merge_hooks(settings: dict, gate_path: Path, command: str) -> tuple[dict, int, int]:
+    """Add the gate to each (event, matcher) slot that does not already run it; an entry
+    that runs our gate with a different command line (older interpreter) is updated.
+    Other hooks, other matchers and every other setting are left exactly as they are.
+    Returns (settings, added, updated)."""
     out = json.loads(json.dumps(settings))  # deep copy
     hooks = out.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise click.ClickException("settings.json: 'hooks' is not an object")
-    added = 0
+    added = updated = 0
     for event, matcher in HOOK_SLOTS:
         groups = hooks.setdefault(event, [])
         if not isinstance(groups, list):
             raise click.ClickException(f"settings.json: hooks.{event} is not a list")
-        # already there (any matcher group that matches exactly and runs the gate)?
-        present = any(isinstance(g, dict) and g.get("matcher") == matcher
-                      and any(is_gate_hook(h) for h in g.get("hooks") or []) for g in groups)
-        if present:
+        ours = [h for g in groups if isinstance(g, dict) and g.get("matcher") == matcher
+                for h in (g.get("hooks") or []) if is_gate_hook(h, gate_path)]
+        if ours:
+            for h in ours:
+                if h.get("command") != command:
+                    h["command"] = command
+                    updated += 1
             continue
         target = next((g for g in groups if isinstance(g, dict) and g.get("matcher") == matcher), None)
         entry = {"type": "command", "command": command}
@@ -229,10 +259,10 @@ def merge_hooks(settings: dict, command: str) -> tuple[dict, int]:
         else:
             target.setdefault("hooks", []).append(entry)
         added += 1
-    return out, added
+    return out, added, updated
 
 
-def remove_hooks(settings: dict) -> tuple[dict, int]:
+def remove_hooks(settings: dict, gate_path: Path) -> tuple[dict, int]:
     out = json.loads(json.dumps(settings))
     hooks = out.get("hooks")
     if not isinstance(hooks, dict):
@@ -246,7 +276,7 @@ def remove_hooks(settings: dict) -> tuple[dict, int]:
             if not isinstance(g, dict) or not isinstance(g.get("hooks"), list):
                 kept_groups.append(g)
                 continue
-            kept = [h for h in g["hooks"] if not is_gate_hook(h)]
+            kept = [h for h in g["hooks"] if not is_gate_hook(h, gate_path)]
             removed += len(g["hooks"]) - len(kept)
             if kept or not g["hooks"]:
                 kept_groups.append(dict(g, hooks=kept))
@@ -259,27 +289,20 @@ def remove_hooks(settings: dict) -> tuple[dict, int]:
 
 
 def remove_section(text: str) -> str:
-    """Drop the '## fcrawl' section (up to the next '## ' heading or a '---' rule)."""
-    lines = text.splitlines(keepends=True)
-    out: list[str] = []
-    skipping = False
-    for line in lines:
-        if skipping:
-            if line.startswith("## ") or line.strip() == "---":
-                skipping = False
-            else:
-                continue
-        if is_our_heading(line):
-            skipping = True
-            continue
-        out.append(line)
-    return "".join(out)
-
-
-def is_our_heading(line: str) -> bool:
-    """'## fcrawl' alone or followed by a space ('## fcrawl — …'); '## fcrawl-gateway' is not ours."""
-    head = line.rstrip("\n")
-    return head == CLAUDE_MD_HEADING or head.startswith(CLAUDE_MD_HEADING + " ")
+    """Drop exactly the block between our markers (and one blank line before it, if that
+    blank line was ours). Anything the user wrote, including their own '## fcrawl …'
+    headings, stays."""
+    start = text.find(CLAUDE_MD_BEGIN)
+    end = text.find(CLAUDE_MD_END, start)
+    if start < 0 or end < 0:
+        return text
+    end += len(CLAUDE_MD_END)
+    if text[end:end + 1] == "\n":
+        end += 1
+    before = text[:start]
+    if before.endswith("\n\n"):
+        before = before[:-1]
+    return before + text[end:]
 
 
 @click.group()

@@ -1020,14 +1020,19 @@ def test_sr2_search_sends_tbs_news_engine_and_locale(monkeypatch, tmp_path):
     class R:
         status_code = 200
 
+        def __init__(self, body):
+            self.body = body
+
         def json(self):
-            return {"credits": 2, "organic": [
-                {"title": "A", "link": "https://a.example/x", "snippet": "s", "position": 1, "date": "Jun 11, 2026"}],
-                    "gw": {"gwEngine": "serper", "gwProvider": "serper"}}
+            return self.body
 
     def post(url, headers=None, json=None, timeout=None):
         sent.append(json)
-        return R()
+        # a round-2 gateway echoes the engine and the type it honoured
+        return R({"credits": 2, "searchParameters": {"type": json.get("type", "search")},
+                  "organic": [{"title": "A", "link": "https://a.example/x", "snippet": "s", "position": 1,
+                               "date": "Jun 11, 2026"}],
+                  "gw": {"gwEngine": json.get("engine", "serper"), "gwProvider": json.get("engine", "serper")}})
 
     monkeypatch.setattr(s.requests, "post", post)
     out = CliRunner().invoke(cli, ["search", "成功嶺 新訓", "--no-cache", "--no-pretty", "--since", "1w", "--news",
@@ -1108,3 +1113,119 @@ def test_sr2_strip_translate_param_in_scrape(monkeypatch, tmp_path):
     # the original URL is now a local cache hit
     out = CliRunner().invoke(cli, ["scrape", "https://www.reddit.com/r/x/comments/1/t/", "--save-temp"])
     assert "Using cached result" in out.output
+
+
+
+# --- search round 2, astra round 1 ------------------------------------------------------
+
+
+def test_sr2r1_old_gateway_ignoring_engine_or_news_is_an_error(monkeypatch, tmp_path):
+    """#8: the deployed gateway (main today) ignores engine/type. The client must not
+    report what it asked for as what it got."""
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+
+    _gw_rc(tmp_path, monkeypatch)
+
+    class R:
+        status_code = 200
+
+        def json(self):  # main's shape: gwProvider only, searchParameters without type
+            return {"credits": 2, "searchParameters": {"q": "q", "gl": "us", "hl": "en", "num": 10},
+                    "organic": [{"title": "A", "link": "https://a.example/x", "snippet": "s", "position": 1}],
+                    "gw": {"gwProvider": "serper", "gwCached": False, "gwBatches": 2}}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
+    out = CliRunner().invoke(cli, ["search", "q", "--engine", "firecrawl", "--no-cache", "--no-pretty"])
+    assert out.exit_code != 0 and "does not support --engine firecrawl" in out.output
+    out = CliRunner().invoke(cli, ["search", "q", "--news", "--no-cache", "--no-pretty"])
+    assert out.exit_code != 0 and "does not support --news" in out.output
+    # a plain search against main still works and reports serper (from gwProvider)
+    out = CliRunner().invoke(cli, ["search", "q", "--no-cache", "--json"])
+    assert out.exit_code == 0, out.output
+    assert json.loads(out.output[out.output.index("{"):])["engine"] == "serper"
+
+
+def test_sr2r1_cached_listing_with_ids_expires(monkeypatch, tmp_path):
+    """#2 (client side): a cached listing whose g: ids are past the gateway's expiry is not
+    served from the local cache; the gateway is asked again."""
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+    from fcrawl.utils import cache as cache_mod
+
+    _gw_rc(tmp_path, monkeypatch)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    calls = {"n": 0}
+    expires = {"at": "2099-01-01T00:00:00+00:00"}
+
+    class R:
+        status_code = 200
+
+        def __init__(self, page):
+            self.page = page
+
+        def json(self):
+            if self.page > 1:
+                return {"credits": 1, "organic": []}
+            calls["n"] += 1
+            return {"credits": 2, "organic": [
+                {"title": "A", "link": GOTO + "a", "snippet": "s", "position": 1, "gwGoto": True, "gotoId": f"g:7kq2m{calls['n'] + 1}"}],
+                    "gw": {"gwEngine": "serper", "gwProvider": "serper", "gwGoto": True, "gwGotoExpiresAt": expires["at"]}}
+
+    monkeypatch.setattr(s.requests, "post", lambda url, headers=None, json=None, timeout=None: R(json["page"]))
+    out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-pretty"])
+    assert out.exit_code == 0 and "g:7kq2m2" in out.output and calls["n"] == 1
+    out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-pretty"])
+    assert "Using cached result" in out.output and calls["n"] == 1  # still valid: cache
+    # rewrite the cache entry's expiry into the past (what a 3-hour-old entry looks like)
+    for path, data in cache_mod.iter_cache("search"):
+        data["goto_expires_at"] = "2026-01-01T00:00:00+00:00"
+        path.write_text(json.dumps(data))
+    out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-pretty"])
+    assert out.exit_code == 0 and "Using cached result" not in out.output and calls["n"] == 2
+    assert "g:7kq2m3" in out.output
+    # a listing without tickets is served from cache regardless
+    class R2:
+        status_code = 200
+
+        def __init__(self, page):
+            self.page = page
+
+        def json(self):
+            if self.page > 1:
+                return {"credits": 1, "organic": []}
+            calls["n"] += 1
+            return {"credits": 2, "organic": [{"title": "A", "link": "https://a.example/", "snippet": "s", "position": 1}],
+                    "gw": {"gwEngine": "serper", "gwProvider": "serper", "gwGoto": False}}
+    monkeypatch.setattr(s.requests, "post", lambda url, headers=None, json=None, timeout=None: R2(json["page"]))
+    CliRunner().invoke(cli, ["search", "plain", "--no-pretty"])
+    for path, data in cache_mod.iter_cache("search"):
+        if data.get("results") and data["results"][0]["url"] == "https://a.example/":
+            data["goto_expires_at"] = "2026-01-01T00:00:00+00:00"  # ignored: no tickets
+            path.write_text(json.dumps(data))
+    n = calls["n"]
+    out = CliRunner().invoke(cli, ["search", "plain", "--no-pretty"])
+    assert "Using cached result" in out.output and calls["n"] == n
+
+
+def test_sr2r1_pre_expiry_cache_entries_use_file_age(monkeypatch, tmp_path):
+    """A listing cached by an older client (no goto_expires_at / fetched_at) with tickets
+    is trusted for the registry TTL from the file's mtime, then refetched."""
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+    from fcrawl.utils import cache as cache_mod
+    from fcrawl.utils.cache import cache_key, get_cache_path, write_cache
+
+    _gw_rc(tmp_path, monkeypatch)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    key = cache_key("oldq2", {"engine": "serper", "limit": 20, "gl": "us", "hl": "en", "location": None})
+    write_cache("search", key, {"results": [{"title": "T", "url": GOTO + "old", "description": "d", "position": 1}],
+                                "elapsed": 0.1, "engine": "serper", "gl": "us", "hl": "en", "pages": 1, "location": None, "extras": {}})
+    out = CliRunner().invoke(cli, ["search", "oldq2", "--no-pretty"])
+    assert "Using cached result" in out.output
+    import os, time as _t
+    path = get_cache_path("search", key)
+    os.utime(path, (_t.time() - 3 * 3600, _t.time() - 3 * 3600))
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: (_ for _ in ()).throw(s.requests.ConnectionError("no gw")))
+    out = CliRunner().invoke(cli, ["search", "oldq2", "--no-pretty"])
+    assert "Using cached result" not in out.output and out.exit_code != 0  # went to the gateway
