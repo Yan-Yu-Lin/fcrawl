@@ -7,7 +7,6 @@ sent in the last 60 s, a cooldown deadline set from 429 Retry-After, and a
 disabled flag for 401/402.
 """
 
-import fcntl
 import hashlib
 import json
 import os
@@ -17,7 +16,9 @@ import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple, TypeVar
 
-STATE_DIR = Path("/tmp/fcrawl-keys")
+from .platform import exclusive_lock, tmp_root
+
+STATE_DIR = tmp_root() / "fcrawl-keys"
 WINDOW_SECONDS = 60
 DEFAULT_RETRY_AFTER = 10
 DEFAULT_MAX_WAIT = 75
@@ -93,8 +94,7 @@ class KeyPool:
 
     def _locked(self, fn: Callable[[dict], T]) -> T:
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        with open(self.lock_file, "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with open(self.lock_file, "a+") as lock, exclusive_lock(lock):
             state = self._load()
             now = time.time()
             for entry in state.values():

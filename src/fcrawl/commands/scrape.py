@@ -29,6 +29,7 @@ from ..utils.output import (
     extract_markdown_links,
     resolve_pretty,
 )
+from ..utils.platform import tmp_root
 from ..utils.cache import (
     cache_key,
     metadata_to_dict,
@@ -85,7 +86,7 @@ ARTICLE_EXCLUDE_TAGS = [
 ]
 
 DEFAULT_SCRAPE_TIMEOUT = 12
-AUTO_SAVE_DIR = Path("/tmp/fcrawl-saved")
+AUTO_SAVE_DIR = tmp_root() / "fcrawl-saved"
 
 
 class BlockedResult(RuntimeError):

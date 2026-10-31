@@ -7,7 +7,9 @@ import time
 from pathlib import Path
 from typing import Any, Iterator, Optional, Tuple
 
-CACHE_DIR = Path("/tmp/fcrawl-cache")
+from .platform import tmp_root
+
+CACHE_DIR = tmp_root() / "fcrawl-cache"
 
 # Signs that a "successful" response is really a bot-challenge or error page.
 # Titles are matched whole (after stripping " | Site" suffixes) so an article

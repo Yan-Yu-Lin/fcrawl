@@ -10,6 +10,8 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
+from .platform import tmp_root
+
 if TYPE_CHECKING:
     from firecrawl import Firecrawl
     from .keypool import KeyPool
@@ -256,7 +258,7 @@ def get_key_pool(max_wait: Optional[int] = None) -> "KeyPool":
             keys[:1] or ["local-dummy-key"],
             rate_limit=10**9,
             max_wait=0,
-            state_dir=Path("/tmp/fcrawl-keys-local"),
+            state_dir=tmp_root() / "fcrawl-keys-local",
         )
     return KeyPool(
         keys,
