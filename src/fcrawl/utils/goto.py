@@ -52,6 +52,30 @@ def is_google_host(host: Any) -> bool:
     return any(GOOGLE_DOMAIN_RE.match(".".join(labels[i:])) for i in range(len(labels)))
 
 
+def path_canonical(path: Any) -> str:
+    """Same rule as the gateway: repeated percent-decode, backslash as slash, RFC 3986
+    dot-segment removal (empty segments count while ".." is applied), then redundant and
+    trailing slashes dropped. "/./goto", "/a/../goto", "/goto//.." are all "/goto"."""
+    if not isinstance(path, str):
+        return ""
+    text = path
+    for _ in range(3):
+        decoded = unquote(text)
+        if decoded == text:
+            break
+        text = decoded
+    out: list[str] = []
+    for seg in text.replace("\\", "/").split("/"):
+        if seg == ".":
+            continue
+        if seg == "..":
+            if out:
+                out.pop()
+            continue
+        out.append(seg)
+    return "/" + "/".join(s for s in out if s)
+
+
 def is_goto(url: Any) -> bool:
     if not isinstance(url, str):
         return False
@@ -59,7 +83,7 @@ def is_goto(url: Any) -> bool:
         p = urlsplit(url)
     except ValueError:
         return False
-    return p.scheme in ("http", "https") and is_google_host(p.hostname) and unquote(p.path).rstrip("/") == "/goto"
+    return p.scheme in ("http", "https") and is_google_host(p.hostname) and path_canonical(p.path) == "/goto"
 
 
 def goto_label(index: int, displayed: Optional[str] = None, pending: bool = False) -> str:

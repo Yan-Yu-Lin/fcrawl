@@ -718,3 +718,39 @@ def test_r5_missing_answers_checked_per_chunk(monkeypatch, tmp_path):
     monkeypatch.setattr(g.requests, "post", honest)
     out = g.resolve_via_gateway(tickets)
     assert len(calls) == 2 and set(out) == set(tickets) and all(v["status"] == "ok" for v in out.values())
+
+
+def test_r6_client_is_goto_matches_gateway_path_normalization(monkeypatch, tmp_path):
+    """Round 6: the client must call a dot-segment ticket a ticket (and send it to the
+    gateway) instead of printing "not a goto ticket" and exiting 0."""
+    from fcrawl.cli import cli
+    from fcrawl.utils import goto as g
+
+    assert g.path_canonical("/./goto") == g.path_canonical("/goto//..") == g.path_canonical("/%2e/goto") == "/goto"
+    assert g.path_canonical("/about//../goto") == "/about/goto"
+    tickets = ["https://www.google.com/./goto?url=x", "https://www.google.com/a/../goto?url=x",
+               "https://www.google.com/goto//..?url=x"]
+    assert all(g.is_goto(t) for t in tickets)
+    assert not g.is_goto("https://www.google.com/about//../goto?url=x")
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+    sent = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, rows):
+            self.rows = rows
+
+        def json(self):
+            return {"urls": self.rows}
+
+    def post(url, json=None, **kw):
+        sent.extend(json["urls"])
+        return R([{"url": u, "status": "ok", "resolved": "https://real.example/p"} for u in json["urls"]])
+
+    monkeypatch.setattr(g.requests, "post", post)
+    out = CliRunner().invoke(cli, ["resolve", "--json", tickets[0]])
+    assert out.exit_code == 0, out.output
+    assert sent == [tickets[0]] and "not_a_ticket" not in out.output and "https://real.example/p" in out.output
