@@ -342,7 +342,7 @@ def test_goto_search_flags(monkeypatch, tmp_path):
     assert out.exit_code == 0, out.output
     assert seen["X-Search-Batches"] == "1"
     assert "[goto] https://a.example › p" in out.output
-    assert f"ticket: {GOTO}a" in out.output  # the real ticket is still there for scrape
+    assert f"fcrawl scrape {GOTO}a" in out.output  # no short id from this gateway: the ticket is the handle
     out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-cache", "--no-pretty"])
     assert GOTO + "a" in out.output  # --urls-only keeps tickets as URLs (feeds scrape)
     out = CliRunner().invoke(cli, ["search", "q", "--single", "--batches", "3"])
@@ -579,7 +579,7 @@ def test_r2_old_cache_rows_get_goto_marker(monkeypatch, tmp_path):
                                 "elapsed": 0.1, "engine": "serper", "gl": "us", "hl": "en", "pages": 1, "location": None, "extras": {}})
     out = CliRunner().invoke(cli, ["search", "oldq", "--no-pretty"])
     assert out.exit_code == 0, out.output
-    assert "[goto #1]" in out.output and f"ticket: {GOTO}old" in out.output
+    assert "[goto #1]" in out.output and f"fcrawl scrape {GOTO}old" in out.output
 
 
 def test_r3_resolve_bad_response_body_is_handled(monkeypatch, tmp_path):
@@ -754,3 +754,213 @@ def test_r6_client_is_goto_matches_gateway_path_normalization(monkeypatch, tmp_p
     out = CliRunner().invoke(cli, ["resolve", "--json", tickets[0]])
     assert out.exit_code == 0, out.output
     assert sent == [tickets[0]] and "not_a_ticket" not in out.output and "https://real.example/p" in out.output
+
+
+# --- search round 2: short goto ids ------------------------------------------------
+
+
+def _gw_rc(tmp_path, monkeypatch):
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"api_url": "http://127.0.0.1:3800", "gateway_token": "fgw_x_t"}))
+    monkeypatch.chdir(tmp_path)
+
+
+def test_sr2_is_short_id_and_ticket_ref():
+    from fcrawl.utils import goto as g
+
+    assert g.is_short_id("g:7kq2mx") and g.is_ticket_ref("g:7kq2mx") and g.is_ticket_ref(GOTO + "a")
+    for bad in ("g:7KQ2MX", "g:7kq2m", "g:0ooo11", "G:7kq2mx", "7kq2mx", "https://x/g:7kq2mx", None):
+        assert not g.is_short_id(bad), bad
+    assert not g.is_ticket_ref("https://example.com/")
+
+
+def test_sr2_search_shows_scrape_hint_with_short_id(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+    from fcrawl.utils import cache as cache_mod
+
+    _gw_rc(tmp_path, monkeypatch)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 2, "organic": [
+                {"title": "Real", "link": "https://real.example/a", "snippet": "r", "position": 1},
+                {"title": "A", "link": GOTO + "a", "snippet": "s", "position": 2, "gwGoto": True,
+                 "gotoId": "g:7kq2mx", "displayedLink": "https://a.example › p"},
+                {"title": "B", "link": GOTO + "b", "snippet": "s", "position": 3, "gwGoto": True,
+                 "gotoId": "not-an-id"},
+            ]}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
+    out = CliRunner().invoke(cli, ["search", "q", "--no-pretty"])
+    assert out.exit_code == 0, out.output
+    assert "[goto] https://a.example › p" in out.output
+    assert "→ fcrawl scrape g:7kq2mx" in out.output
+    assert f"→ fcrawl scrape {GOTO}b" in out.output  # a bad id is ignored: the ticket is the handle
+    assert GOTO + "a" not in out.output  # the 200-char ticket is not printed when there is an id
+    # pretty output: same hint
+    out = CliRunner().invoke(cli, ["search", "q", "--pretty"])
+    assert out.exit_code == 0 and "fcrawl scrape g:7kq2mx" in out.output
+    # --urls-only prints ids for goto rows, URLs for the rest (pipeable into scrape)
+    out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-pretty"])
+    assert out.output.splitlines()[-3:] == ["https://real.example/a", "g:7kq2mx", GOTO + "b"]
+    # --json keeps the full ticket and adds gotoId
+    out = CliRunner().invoke(cli, ["search", "q", "--json", "--no-cache"])
+    rows = json.loads(out.output[out.output.index("{"):])["results"]
+    assert rows[1]["url"] == GOTO + "a" and rows[1]["gotoId"] == "g:7kq2mx" and rows[1]["goto"] is True
+    assert "gotoId" not in rows[2]
+    # the cache entry stores the id
+    out = CliRunner().invoke(cli, ["search", "q", "--urls-only", "--no-pretty"])
+    assert "Using cached result" in out.output and "g:7kq2mx" in out.output
+
+
+def test_sr2_search_resolve_uses_ids(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import search as s
+
+    _gw_rc(tmp_path, monkeypatch)
+
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"credits": 2, "organic": [
+                {"title": "A", "link": GOTO + "a", "snippet": "s", "position": 1, "gwGoto": True, "gotoId": "g:7kq2mx"},
+                {"title": "B", "link": GOTO + "b", "snippet": "s", "position": 2, "gwGoto": True},
+            ]}
+
+    monkeypatch.setattr(s.requests, "post", lambda *a, **k: R())
+    asked = {}
+
+    def fake_resolve(urls, wait=False):
+        asked["urls"] = list(urls)
+        return {"g:7kq2mx": {"resolved": "https://a.real", "status": "ok", "ticket": GOTO + "a", "gotoId": "g:7kq2mx"},
+                GOTO + "b": {"resolved": None, "status": "cooldown", "ticket": GOTO + "b", "gotoId": None}}
+
+    monkeypatch.setattr(s, "resolve_via_gateway", fake_resolve)
+    out = CliRunner().invoke(cli, ["search", "q", "--resolve", "--no-cache", "--no-pretty"])
+    assert out.exit_code == 0, out.output
+    assert asked["urls"] == ["g:7kq2mx", GOTO + "b"]  # id when there is one, else the ticket
+    assert "https://a.real" in out.output and "[goto #2 pending]" in out.output
+    assert "Resolved 1/2" in out.output
+
+
+def test_sr2_resolve_via_gateway_rows_for_ids(monkeypatch, tmp_path):
+    """Rows come back in input order; an id entry is answered with url=ticket, gotoId=id."""
+    from fcrawl.utils import goto as g
+
+    _gw_rc(tmp_path, monkeypatch)
+    sent = []
+
+    class R:
+        status_code = 200
+
+        def __init__(self, rows):
+            self.rows = rows
+
+        def json(self):
+            return {"urls": self.rows}
+
+    def post(url, json=None, **kw):
+        sent.append(list(json["urls"]))
+        return R([
+            {"url": GOTO + "a", "gotoId": "g:7kq2mx", "resolved": "https://a.real", "status": "ok", "displayedLink": None},
+            {"url": GOTO + "b", "gotoId": "g:p9z4rt", "resolved": None, "status": "cooldown", "displayedLink": None},
+            {"url": "g:zzzzzz", "gotoId": "g:zzzzzz", "resolved": None, "status": "expired", "displayedLink": None},
+        ])
+
+    monkeypatch.setattr(g.requests, "post", post)
+    out = g.resolve_via_gateway(["g:7kq2mx", GOTO + "b", "g:zzzzzz"])
+    assert sent == [["g:7kq2mx", GOTO + "b", "g:zzzzzz"]]
+    assert out["g:7kq2mx"] == {"resolved": "https://a.real", "status": "ok", "ticket": GOTO + "a", "gotoId": "g:7kq2mx"}
+    assert out[GOTO + "b"] == {"resolved": None, "status": "cooldown", "ticket": GOTO + "b", "gotoId": "g:p9z4rt"}
+    assert out["g:zzzzzz"] == {"resolved": None, "status": "expired", "ticket": None, "gotoId": "g:zzzzzz"}
+    # a row about something else in that position is an error
+    def bad(url, json=None, **kw):
+        return R([{"url": GOTO + "other", "gotoId": "g:aaaaaa", "resolved": "https://x", "status": "ok"}])
+    monkeypatch.setattr(g.requests, "post", bad)
+    with pytest.raises(RuntimeError):
+        g.resolve_via_gateway(["g:7kq2mx"])
+    # wrong row count is an error
+    def short(url, json=None, **kw):
+        return R([])
+    monkeypatch.setattr(g.requests, "post", short)
+    with pytest.raises(RuntimeError):
+        g.resolve_via_gateway(["g:7kq2mx"])
+
+
+def test_sr2_resolve_command_accepts_ids(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import resolve as rmod
+
+    _gw_rc(tmp_path, monkeypatch)
+    calls = {}
+
+    def fake(urls, wait=False):
+        calls["urls"] = list(urls)
+        return {"g:7kq2mx": {"resolved": "https://a.real", "status": "ok", "ticket": GOTO + "a", "gotoId": "g:7kq2mx"},
+                "g:zzzzzz": {"resolved": None, "status": "expired", "ticket": None, "gotoId": "g:zzzzzz"}}
+
+    monkeypatch.setattr(rmod, "resolve_via_gateway", fake)
+    out = CliRunner().invoke(cli, ["resolve", "g:7kq2mx", "g:zzzzzz", "https://plain"])
+    assert calls["urls"] == ["g:7kq2mx", "g:zzzzzz"]
+    assert out.exit_code == 1, out.output  # expired counts as failed
+    assert "https://a.real" in out.output and "[goto expired] g:zzzzzz" in out.output and "not a goto ticket" in out.output
+    out = CliRunner().invoke(cli, ["resolve", "--json", "g:7kq2mx", "g:zzzzzz"])
+    assert out.exit_code == 1 and '"gotoId": "g:7kq2mx"' in out.output and '"status": "expired"' in out.output
+    # direct mode: ids are refused with a clear message, no gateway call
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"firecrawl_api_key": "fc-x"}))
+    calls.clear()
+    out = CliRunner().invoke(cli, ["resolve", "g:7kq2mx"])
+    assert out.exit_code != 0 and "gateway mode" in out.output and not calls
+
+
+def test_sr2_scrape_short_id(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import scrape as sc
+    from fcrawl.utils import cache as cache_mod
+
+    _gw_rc(tmp_path, monkeypatch)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    real = "https://real.example/page2"
+    seen = []
+
+    def fake_gateway(url, scrape_options, timeout, allow_jina, no_cache=False):
+        from firecrawl.v2.types import Document, DocumentMetadata
+        seen.append(url)
+        doc = Document(markdown="# hi " + "x" * 900, metadata=DocumentMetadata(
+            title="t", url=real, sourceURL=real, gwProvider="firecrawl", gwResolvedFrom=GOTO + "zzz"))
+        return sc.TaggedResult(doc, provider="firecrawl")
+
+    monkeypatch.setattr(sc, "scrape_with_gateway", fake_gateway)
+    out = CliRunner().invoke(cli, ["scrape", "g:7kq2mx", "--save-temp"])
+    assert out.exit_code == 0, out.output
+    assert seen == ["g:7kq2mx"]  # passed through unchanged
+    assert "Resolved: g:7kq2mx → " + real in out.output
+    assert "goto-7kq2mx" in out.output  # the temp file is named after the id
+    from fcrawl.utils.cache import cache_key, read_cache
+    opts = {"formats": ["markdown"], "article": False, "raw": False, "include_tags": None, "exclude_tags": None,
+            "wait": None, "timeout": sc.DEFAULT_SCRAPE_TIMEOUT}
+    assert read_cache("scrape", cache_key(real, opts)) is not None
+    assert read_cache("scrape", cache_key("g:7kq2mx", opts)) is None
+    # expired id: the gateway's message is relayed with the re-run hint
+    def expired(url, scrape_options, timeout, allow_jina, no_cache=False):
+        raise RuntimeError("Failed to scrape. goto_expired: unknown or expired goto id; re-run the search - x")
+    monkeypatch.setattr(sc, "scrape_with_gateway", expired)
+    out = CliRunner().invoke(cli, ["scrape", "g:zzzzzz", "--no-cache"])
+    assert out.exit_code != 0 and "goto_expired" in out.output and "Re-run" in out.output
+
+
+def test_sr2_scrape_short_id_direct_mode_error(monkeypatch, tmp_path):
+    from fcrawl.cli import cli
+    from fcrawl.commands import scrape as sc
+    from fcrawl.utils import cache as cache_mod
+
+    (tmp_path / ".fcrawlrc").write_text(json.dumps({"firecrawl_api_key": "fc-x"}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cache_mod, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(sc, "scrape_with_firecrawl", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not be called")))
+    out = CliRunner().invoke(cli, ["scrape", "g:7kq2mx", "--no-cache"])
+    assert out.exit_code != 0 and "gateway mode" in out.output

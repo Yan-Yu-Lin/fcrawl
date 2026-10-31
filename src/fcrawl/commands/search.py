@@ -11,7 +11,7 @@ from rich.table import Table
 
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import gateway_url, is_gateway, load_config
-from ..utils.goto import goto_label, is_goto, resolve_via_gateway
+from ..utils.goto import goto_label, is_goto, is_short_id, resolve_via_gateway
 from ..utils.output import console, handle_output, resolve_pretty
 
 
@@ -167,6 +167,9 @@ def _serper_search(
                 if is_goto(url) or item.get("gwGoto"):
                     # a Google goto ticket: opaque here, the gateway resolves it on use
                     result_item["goto"] = True
+                    if is_short_id(item.get("gotoId")):
+                        # the gateway's short handle: what we show and what scrape accepts
+                        result_item["gotoId"] = item["gotoId"]
                 if item.get("displayedLink"):
                     # Google's visible breadcrumb ("https://host › a › b"), untouched by goto
                     result_item["displayed"] = item["displayedLink"]
@@ -235,6 +238,12 @@ def shown_url(item: dict) -> str:
     return item.get("url", "")
 
 
+def goto_ref(item: dict) -> str:
+    """What to hand to scrape/resolve for a goto result: the short id when the gateway
+    gave one, else the full ticket (results cached before short ids)."""
+    return item.get("gotoId") or item.get("url", "")
+
+
 def _display_results(results: list[dict]):
     """Display search results in pretty mode."""
     console.print("\n[bold]Search Results[/bold]", justify="center")
@@ -250,6 +259,8 @@ def _display_results(results: list[dict]):
         console.print(url, style="blue", markup=False)
         if description:
             console.print(description, markup=False)
+        if item.get("goto") and not item.get("resolved"):
+            console.print(f"  → fcrawl scrape {goto_ref(item)}", style="dim", markup=False)
         console.print()
 
     console.print("=" * 60)
@@ -258,15 +269,15 @@ def _display_results(results: list[dict]):
 def resolve_results(results: list[dict], wait: bool = False) -> int:
     """Ask the gateway for the real URL behind every goto ticket; mark the rest pending.
     Returns how many were resolved."""
-    tickets = [r["url"] for r in results if r.get("goto") and not r.get("resolved")]
-    if not tickets:
+    refs = [goto_ref(r) for r in results if r.get("goto") and not r.get("resolved")]
+    if not refs:
         return 0
-    answers = resolve_via_gateway(tickets, wait=wait)
+    answers = resolve_via_gateway(refs, wait=wait)
     n = 0
     for r in results:
-        if not r.get("goto"):
+        if not r.get("goto") or r.get("resolved"):
             continue
-        a = answers.get(r["url"]) or {}
+        a = answers.get(goto_ref(r)) or {}
         if a.get("resolved"):
             r["resolved"] = a["resolved"]
             n += 1
@@ -480,8 +491,14 @@ def search(
     elif not pretty:
         if urls_only:
             for item in results:
-                # tickets stay as URLs here: this output feeds scrape, which resolves them
-                print(item.get("resolved") or item.get("url", ""))
+                # a goto result prints as its g:xxxxxx id (or the ticket when there is
+                # none): this output feeds scrape, which resolves either
+                if item.get("resolved"):
+                    print(item["resolved"])
+                elif item.get("goto"):
+                    print(goto_ref(item))
+                else:
+                    print(item.get("url", ""))
         else:
             for item in results:
                 url = shown_url(item)
@@ -493,4 +510,4 @@ def search(
                 if desc:
                     print(f"  {desc}")
                 if item.get("goto") and not item.get("resolved"):
-                    print(f"  ticket: {item['url']}")
+                    print(f"  → fcrawl scrape {goto_ref(item)}")

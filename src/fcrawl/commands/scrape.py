@@ -20,7 +20,7 @@ from ..utils.config import (
     is_gateway,
     load_config,
 )
-from ..utils.goto import direct_redeem, is_goto
+from ..utils.goto import direct_redeem, is_goto, is_short_id, is_ticket_ref
 from ..utils.keypool import KeyPoolExhausted
 from ..utils.output import (
     handle_output,
@@ -168,6 +168,8 @@ def scrape_with_gateway(
 
 def sanitize_url_for_path(url: str) -> str:
     """Convert URL to a readable filesystem slug."""
+    if is_short_id(url):
+        return "goto-" + url[2:]
     parsed = urlparse(url)
     host = re.sub(r"[^a-zA-Z0-9.-]", "-", parsed.netloc or "page")
     path = re.sub(r"[^a-zA-Z0-9._-]+", "-", parsed.path.strip("/"))
@@ -310,11 +312,16 @@ def fetch_scrape_result(
             if message.startswith("goto_unresolved"):
                 raise RuntimeError(f"{message}. The Google goto ticket is still cooling down; "
                                    "retry in ~20 s or run `fcrawl resolve <ticket> --wait`") from exc
+            if message.startswith("goto_expired"):
+                raise RuntimeError(f"{message}. Re-run `fcrawl search` and use the new g:xxxxxx id") from exc
             raise RuntimeError(message) from exc
         ok, reason = validate_result(result)
         if ok:
             return result
         raise BlockedResult(f"Blocked by the target site (gateway: {reason})")
+    if is_short_id(url):
+        raise RuntimeError("goto ids (g:xxxxxx) need gateway mode: set gateway_token in ~/.fcrawlrc, "
+                           "or scrape the full google.com/goto ticket from `fcrawl search --json`")
     if is_goto(url):
         # direct mode: no gateway to resolve for us. One GET from this machine (the
         # user's own IP, their choice); a 302 gives the real page, otherwise Google's
@@ -651,9 +658,9 @@ def scrape(
                 # A goto ticket is unique per search, so a result fetched through
                 # one is cached under the real URL it resolved to (the gateway puts
                 # it in metadata); the next ticket for the same page hits locally.
-                real = real_url_of(result) if is_goto(url) else None
+                real = real_url_of(result) if is_ticket_ref(url) else None
                 if real:
-                    console.print(f"[dim]Resolved: {url[:60]}… → {real}[/dim]")
+                    console.print(f"[dim]Resolved: {url if is_short_id(url) else url[:60] + '…'} → {real}[/dim]")
                     write_cache("scrape", cache_key(real, cache_opts), result_to_dict(result))
                 else:
                     write_cache("scrape", key, result_to_dict(result))

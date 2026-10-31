@@ -170,7 +170,7 @@ def gateway_error_message(exc: Exception) -> str:
     text = str(exc)
     for code in ("personal_quota", "family_quota", "pool_busy", "pool_exhausted", "token_busy",
                  "blocked_by_target", "upstream_error", "bad_token", "x_unavailable", "not_supported",
-                 "goto_unresolved", "bad_request"):
+                 "goto_unresolved", "goto_expired", "bad_request"):
         idx = text.find(code + ":")
         if idx >= 0:
             end = text.find(" - ", idx)

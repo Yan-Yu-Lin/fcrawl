@@ -27,6 +27,17 @@ RESOLVE_TIMEOUT = 20  # /gw/resolve without wait
 RESOLVE_WAIT_TIMEOUT = 75  # with wait: the gateway may hold ~45 s for Serper on one ticket
 MAX_RESOLVE_URLS = 20
 RESOLVE_CHUNK = 6  # tickets per /gw/resolve call: the gateway works 6 at a time
+# the gateway's short form of a ticket: "g:" + 6 chars without 0/o, 1/l/i, u
+SHORT_ID_RE = re.compile(r"^g:[23456789abcdefghjkmnpqrstvwxyz]{6}$")
+
+
+def is_short_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(SHORT_ID_RE.match(value))
+
+
+def is_ticket_ref(value: Any) -> bool:
+    """A goto ticket in either form: the full google.com/goto URL or its g:xxxxxx id."""
+    return is_short_id(value) or is_goto(value)
 
 
 def normalize_host(host: Any) -> str:
@@ -98,8 +109,13 @@ def goto_label(index: int, displayed: Optional[str] = None, pending: bool = Fals
     return f"[goto #{index} pending]" if pending else f"[goto #{index}]"
 
 
+RESOLVE_STATUSES = ("ok", "cooldown", "failed", "expired")
+
+
 def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
-    """POST /gw/resolve. Returns {ticket: {"resolved": real|None, "status": ok|cooldown|failed}}.
+    """POST /gw/resolve with tickets and/or g:xxxxxx ids. Returns, keyed by what was
+    asked, {"resolved": real|None, "status": ok|cooldown|failed|expired, "ticket": full
+    ticket|None, "gotoId": id|None}.
 
     Raises RuntimeError with the gateway's message on any non-200.
     """
@@ -128,28 +144,33 @@ def resolve_via_gateway(urls: list[str], wait: bool = False) -> dict[str, dict]:
             raise RuntimeError(message)
         if not isinstance(payload, dict) or not isinstance(payload.get("urls"), list):
             raise RuntimeError("gateway resolve returned an unexpected response")
-        # every row must be well-formed, answer a ticket of THIS chunk, and answer it once:
-        # anything else is a broken gateway, not a ticket that silently went missing
+        # the gateway answers in input order, one row per entry; row i must be about
+        # chunk[i] (its url is the ticket, its gotoId the short id; an entry given as an
+        # id is echoed by gotoId). Anything else is a broken gateway, not a ticket that
+        # silently went missing
+        rows = payload["urls"]
+        if len(rows) != len(chunk):
+            raise RuntimeError(f"gateway resolve answered {len(rows)} row(s) for {len(chunk)} ticket(s)")
         answers: dict[str, dict] = {}
-        for row in payload["urls"]:
+        for asked, row in zip(chunk, rows):
             if not isinstance(row, dict) or not isinstance(row.get("url"), str) \
-                    or row.get("status") not in ("ok", "cooldown", "failed"):
+                    or row.get("status") not in RESOLVE_STATUSES:
                 raise RuntimeError("gateway resolve returned a malformed row")
+            gid = row.get("gotoId")
+            if gid is not None and not isinstance(gid, str):
+                raise RuntimeError("gateway resolve returned a malformed row")
+            if asked != row["url"] and asked != gid:
+                raise RuntimeError("gateway resolve answered for a ticket that was not asked")
             resolved = row.get("resolved")
             if row["status"] == "ok":
                 if not isinstance(resolved, str) or not resolved.strip():
                     raise RuntimeError("gateway resolve returned a malformed row")
             elif resolved is not None:
                 raise RuntimeError("gateway resolve returned a malformed row")
-            if row["url"] not in chunk:
-                raise RuntimeError("gateway resolve answered for a ticket that was not asked")
-            if row["url"] in answers:
-                raise RuntimeError("gateway resolve answered the same ticket twice")
-            answers[row["url"]] = {"resolved": resolved if row["status"] == "ok" else None,
-                                   "status": row["status"]}
-        missing = [u for u in chunk if u not in answers]
-        if missing:
-            raise RuntimeError(f"gateway resolve answered nothing for {len(missing)} ticket(s)")
+            answers[asked] = {"resolved": resolved if row["status"] == "ok" else None,
+                              "status": row["status"],
+                              "ticket": row["url"] if is_goto(row["url"]) else None,
+                              "gotoId": gid if is_short_id(gid) else None}
         out.update(answers)
     return out
 
