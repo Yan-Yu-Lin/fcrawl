@@ -571,7 +571,8 @@ def cookies_from_browser(preset: Preset, browser: str, profile: Optional[str] = 
     which fcrawl already ships). A fallback, not the main path (`fcrawl auth login` opens
     its own browser window): Chrome/Edge on Windows encrypt cookies so only they can read
     them, a running Chromium locks the file, and a session cookie (ntut's HYSID) may never
-    reach the database at all (Firefox keeps session cookies in memory). yt-dlp's
+    reach the database at all (Firefox keeps session cookies in memory only: checked on
+    Linux, Firefox 158; Chromium does store them). yt-dlp's
     warnings say which of these happened, so they are passed on (they carry no values)."""
     from yt_dlp.cookies import extract_cookies_from_browser  # lazy: imports sqlite/keyring helpers
 
@@ -592,14 +593,15 @@ def cookies_from_browser(preset: Preset, browser: str, profile: Optional[str] = 
     try:
         jar = extract_cookies_from_browser(browser, profile, logger=_Logger())
     except Exception as exc:  # yt-dlp raises DownloadError/CookieLoadError with a readable text
-        raise InstitutionError(f"could not read {browser} cookies: {str(exc).splitlines()[0][:200]}") from None
+        raise InstitutionError(f"could not read {browser} cookies: {str(exc).splitlines()[0][:600]}") from None
     finally:
         for line in warnings[:3]:
             warn(f"{browser}: {line}")
     try:
         return _keep(preset, [_from_cookiejar(c) for c in jar])
     except NotLoggedIn:
-        hint = (f" ({preset.session_cookie} is a session cookie, which {browser} may keep in memory only; "
+        why = "never stores session cookies on disk" if browser == "firefox" else "may keep in memory only"
+        hint = (f" ({preset.session_cookie} is a session cookie, which {browser} {why}; "
                 "use the browser window of plain `fcrawl auth login`, --cookie-file or --paste)") \
             if preset.session_cookie else ""
         raise NotLoggedIn(f"no cookies for {preset.proxy_host} in {browser}'s cookie store{hint}") from None

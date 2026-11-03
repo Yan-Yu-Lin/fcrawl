@@ -183,3 +183,18 @@ def test_rewrite_refuses_odd_urls():
         NTUT.rewrite(f"https://evil.example\\@{P}/x")
     with pytest.raises(I.InstitutionError):
         NTUT.rewrite("https://user@ieeexplore.ieee.org/document/1")
+
+
+def test_browser_reader_error_keeps_the_searched_paths(monkeypatch):
+    """yt-dlp lists every directory it searched; the user needs the whole line."""
+    import yt_dlp.cookies as ytc
+
+    paths = ", ".join(f"'/home/u/.var/app/org.mozilla.firefox/dir{i}'" for i in range(6))
+
+    def boom(*a, **k):
+        raise RuntimeError(f"could not find firefox cookies database in {paths}")
+
+    monkeypatch.setattr(ytc, "extract_cookies_from_browser", boom)
+    with pytest.raises(I.InstitutionError) as exc:
+        I.cookies_from_browser(NTUT, "firefox")
+    assert "dir5'" in str(exc.value)

@@ -154,7 +154,7 @@ def test_login_no_open_lists_the_fallbacks(env):
     enable()
     res = run("auth", "login", "--no-open")
     assert res.exit_code == 0
-    assert "--from-clipboard" in res.output and "untested fallback" in res.output
+    assert "--from-clipboard" in res.output and "Firefox never stores the session cookie" in res.output
 
 
 # --- C: auth status shows the limits in force -----------------------------------------------

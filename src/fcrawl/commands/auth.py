@@ -211,8 +211,8 @@ def _manual_instructions(preset: inst.Preset, open_page: bool) -> None:
     click.echo("  fcrawl auth login --cookie-file cookies.txt   # exported by a 'Get cookies.txt' extension")
     click.echo("  fcrawl auth login --from-clipboard            # Cookie: header value copied from the dev tools")
     click.echo("  fcrawl auth login --paste                     # same, typed/pasted (hidden; short values only)")
-    click.echo("  fcrawl auth login --from-browser firefox      # the browser's cookie store (untested fallback; "
-               "session cookies may be missing)")
+    click.echo("  fcrawl auth login --from-browser chromium     # a Chromium browser's cookie store (Firefox never "
+               "stores the session cookie there)")
 
 
 @auth.command("status")
