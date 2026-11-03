@@ -30,7 +30,9 @@ src/fcrawl/
   utils/output.py        output, UTF-8 stdio, Progress (stderr, off when not a TTY)
   utils/transcriber.py   optional SenseVoice ASR (extra `asr`, lazy import)
   utils/institution.py   institution (library) proxy: presets, cookie store (~/.fcrawl/institution, 0600),
-                         rate limits, fetch through the proxy; `auth` and `papers fetch` sit on it
+                         rate limits (file lock, configurable within a hard ceiling), fetch through the
+                         proxy; `auth`, `papers fetch` and the `papers pdf` fall-through sit on it
+  utils/browser_login.py `auth login`'s own browser window: system Chromium + temp profile, cookies over CDP
   vendors/twitterapi_io/ twitterapi.io client + mapper
   assets/claude/         SOURCE OF TRUTH for the Claude Code skill (skills/fcrawl/SKILL.md) and hook
                          (hooks/fcrawl_gate.py) that `fcrawl setup claude-code` installs
@@ -42,7 +44,7 @@ Dependencies worth knowing: `firecrawl-py` and `twscrape` are pinned to Arthur's
 ## Tests and lint
 
 ```bash
-uv run --with pytest python -m pytest -q     # 253 tests, all offline
+uv run --with pytest python -m pytest -q     # 314 tests, all offline
 uvx ruff check src tests                     # config in pyproject: pyflakes + syntax only
 ```
 
@@ -58,7 +60,8 @@ Smoke tests against the live gateway cost real credits (search 1 Serper credit, 
 - When you edit the skill or hook, edit `src/fcrawl/assets/claude/...`, then run `fcrawl setup claude-code` to refresh `~/.claude`. Don't edit the installed copy alone.
 - A new gateway endpoint also has to be added to the gateway's nginx whitelist (`deploy/nginx-fcrawl.conf` in the gateway repo), or it returns 404 in production.
 - Use `trash`, not `rm`, for files outside the repo.
-- Institution proxy cookies (`utils/institution.py`) stay on the machine: never send them to the gateway or Firecrawl, never log them, never add a username/password login or captcha solving to `fcrawl auth`.
+- Institution proxy cookies (`utils/institution.py`) stay on the machine: never send them to the gateway or Firecrawl, never log or print them (nor browser URLs from the login window: one carries the student id and a token), and send them over https to the proxy host only.
+- A username/password login for `fcrawl auth` is allowed only as something the user turns on themselves (off by default): the password lives in the OS keyring only (macOS Keychain, Windows Credential Manager, Linux Secret Service), never in `.fcrawlrc` or any other file, is never printed or logged, and goes only to the school's login endpoint. No captcha solving.
 
 ## Known gaps
 
@@ -66,3 +69,4 @@ Smoke tests against the live gateway cost real credits (search 1 Serper credit, 
 - `papers` Research Index calls (search/show/read/related) and the `papers pdf` OA lookups (OpenAlex, Semantic Scholar) go directly from the client, keyless; only Scholar goes through the gateway (`/gw/search` type scholar).
 - `scrape -f extract` is a leftover format option, untested against the gateway.
 - With no `.fcrawlrc`, `api_url` defaults to `http://localhost:3002` (self-hosted Firecrawl), and a newcomer sees "connection refused".
+- Institution proxy, not done yet: publisher hosts that contain a `-` (EZproxy writes it `--`; unknown whether Hyweb does) break hostname rewriting/`_unproxy`; cookie `path` is ignored when sending; `auth status` probes every time (no cache); the `prefix` style is untested against a real library. Arc cannot host the login window (no DevTools port). The live ntut checks are done by an NTUT student, not here: nobody on this side has a login.

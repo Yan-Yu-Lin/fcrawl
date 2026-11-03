@@ -97,7 +97,7 @@ fcrawl dev "error message" -t issue -t pull_request
 ```bash
 fcrawl papers "query"                  # titles, year, citations, abstract, PDF link
 fcrawl papers read arxiv:ID -q "..."   # the passages of one paper that answer a question
-fcrawl papers pdf doi:...              # a legal free copy, if one exists
+fcrawl papers pdf doi:...              # a legal free copy; else your library's copy, if you turned that on
 fcrawl papers fetch doi:...            # the PDF through your own library proxy (opt-in, see below)
 ```
 
@@ -116,7 +116,7 @@ Without a gateway, fcrawl can call Firecrawl, Serper and X directly with your ow
 
 ## Optional: your library's subscription
 
-Off by default. `fcrawl auth enable ntut`, then `fcrawl auth login`: it opens the library's login page, you log in there yourself (fcrawl never sees the password), and `fcrawl auth login --from-browser firefox` (or `--cookie-file`, `--paste`) hands the session cookies to fcrawl. From then on `fcrawl papers fetch doi:…` downloads paywalled PDFs through the proxy to a local file. The cookies stay on this machine, go to the proxy host only, and the command is rate limited (20 papers a day, 10 per publisher, 30 s apart). Built-in preset: `ntut` (Taipei Tech); other EZproxy/Hyweb libraries are a few lines in `.fcrawlrc` (`docs/commands.md`, `auth`).
+Off by default. `fcrawl auth enable ntut`, then `fcrawl auth login`: a browser window opens (the Edge, Chrome, Brave or Chromium already on your computer, with a fresh temporary profile), you log in to the library there yourself, captcha included, and the window closes by itself once the session exists. fcrawl never sees the password. From then on `fcrawl papers pdf doi:…` downloads a paywalled PDF through the library when no free copy exists (`fcrawl papers fetch doi:…` does it directly). The cookies stay on this machine, go over https to the proxy host only, and downloads are rate limited (20 papers a day, 10 per publisher, 30 s apart; adjustable within a hard ceiling). No such browser: `--cookie-file`, `--from-clipboard` or `--paste`. Built-in preset: `ntut` (Taipei Tech); other EZproxy/Hyweb libraries are a few lines in `.fcrawlrc` (`docs/commands.md`, `auth`).
 
 ## Optional: local transcription
 
