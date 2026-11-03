@@ -80,6 +80,8 @@ fcrawl scrape https://arxiv.org/pdf/1706.03762 --save-temp   # then read the PDF
 
 Engineering papers (IEEE circuits, ACM) come mostly from Scholar; the index is strongest for AI/ML and biomedicine. If `papers pdf` finds no free copy, a publisher page is usually abstract only: say so and suggest the user's own school access. Never use shadow libraries.
 
+**Paywalled paper through the user's own library** (only when they turned it on): `papers pdf` ends with `fcrawl papers fetch <id>` when the institution proxy is enabled. Run it and Read the PDF at the `RESULT path=`. It is rate limited (20 a day, 10 per publisher, 30 s apart) and refuses when the session is gone: then tell the user to run `fcrawl auth login` themselves (it needs their browser login; never ask for their password). `fcrawl auth status` shows whether a session exists.
+
 ## Scraping pages
 
 ```bash

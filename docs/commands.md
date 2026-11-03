@@ -128,6 +128,7 @@ fcrawl papers show ID                              # metadata + full abstract (O
 fcrawl papers read ID -q "question" [-k 4]         # full-text passages that answer the question
 fcrawl papers related ID [--mode similar|citers|references] [--intent "..."]
 fcrawl papers pdf ID [--no-scholar]                # legal free copy, then: fcrawl scrape <url> --save-temp
+fcrawl papers fetch ID_OR_URL [-o file.pdf]        # the PDF through your own library proxy (see `auth`)
 ```
 
 IDs: `arxiv:1706.03762`, `doi:10.1038/...`, `pmid:N`, `pmcid:PMCN`, bare arXiv ids/DOIs, or arxiv.org / doi.org / PubMed / PMC URLs.
@@ -137,6 +138,28 @@ IDs: `arxiv:1706.03762`, `doi:10.1038/...`, `pmid:N`, `pmcid:PMCN`, bare arXiv i
 - The default `all` runs both in parallel and interleaves them rank by rank. The same paper (same DOI, arXiv or PubMed id, or the same title of 4+ words from both engines) is shown once, with both engines' facts. If one engine fails, the other's results still print, with a warning.
 - `--sort citations|date` re-sorts what was found; it does not search for the most-cited papers overall.
 - `pdf` only looks at legal open-access sources: arXiv, OpenAlex OA locations (publisher OA pages, PMC and other repositories), Semantic Scholar's open PDF (keyless, often rate limited), and finally the paper's Scholar PDF links (1 Serper credit, skip with `--no-scholar`). Those last links are filtered by host: repositories, OA publishers and university (`.edu`, `.ac.*`) pages are shown, ResearchGate/Academia uploads are shown with a warning, and unknown hosts are hidden. When nothing is found it says so and gives the DOI link. There is no shadow-library support and none is planned. A publisher page behind a login wall scrapes as a normal page; read it and you will see it is abstract only.
+
+- `fetch` downloads the PDF of a paywalled paper through the user's own library proxy (`auth` below) to a local file: `RESULT path=… provider=institution:<preset> url=… status=ok bytes=N`. It takes a DOI, a publisher URL or a DOI link; a DOI is first resolved at doi.org itself (public, no cookies) and the publisher page then goes through the proxy. arXiv and PMC ids are free and fetched directly (`provider=direct`, not counted). The landing page's `citation_pdf_url` is used when present; otherwise the known patterns of IEEE Xplore, Springer, ACM, Wiley and Taylor & Francis. Verified live through the ntut proxy: IEEE Xplore and Springer. ScienceDirect hands out PDFs only after a JavaScript challenge that no HTTP client passes: `fetch` says so and prints the proxied article URL to open in a browser. `fcrawl auth status` must be OK first; `papers pdf` mentions `fetch` only while the feature is on.
+
+## auth — your library's subscription (institution proxy; off by default)
+
+```bash
+fcrawl auth presets                          # proxies fcrawl knows (built-in: ntut)
+fcrawl auth enable ntut                      # turn it on; written to .fcrawlrc as institution.{enabled,preset}
+fcrawl auth login                            # opens the library login page in your browser; log in there yourself
+fcrawl auth login --from-browser firefox     # then hand the session cookies to fcrawl (yt-dlp's cookie reader)
+fcrawl auth login --cookie-file cookies.txt  # or a Netscape cookies.txt exported after logging in
+fcrawl auth login --paste                    # or the Cookie: header value from the dev tools (hidden input)
+fcrawl auth status [--no-probe] [--json]     # cookie names (never values), expiry, one probe request, today's usage
+fcrawl auth logout | disable
+```
+
+- fcrawl never asks for the password and never solves a captcha: the login happens in the user's own browser, fcrawl only takes over the session cookies that login left behind. On Windows, Chrome and Edge encrypt their cookies so that only they can read them; Firefox works, `--cookie-file` and `--paste` always work.
+- Cookies live in `~/.fcrawl/institution/<preset>.cookies.json` (owner-only; `FCRAWL_STATE_DIR` moves the folder) and are sent to the proxy host and its subdomains only, never to a publisher directly, never to the gateway or Firecrawl.
+- Built-in limits, kept in `<preset>.usage.json`: 20 papers a day, 10 per publisher a day, at least 30 s between two papers (fcrawl waits). They exist because bulk downloading is what gets a whole school cut off by a publisher.
+- A preset is one library proxy: `proxy_host`, `style` (`hostname`: `ieeexplore.ieee.org` → `ieeexplore-ieee-org.<proxy_host>`, used by EZproxy "proxy by hostname" and Hyweb; `prefix`: `https://<proxy_host>/login?url=<url>`, classic EZproxy), `login_url` (with `{url}`), `login_marker` (where an unauthenticated request is redirected) and `probe_url`. Add your own under `institution.presets.<id>` in `.fcrawlrc` with those fields; `fcrawl auth presets` lists it.
+- Session gone (the proxy redirects to its login page) → `fcrawl auth login` again. For ntut the session cookie is `HYSID` on `.search.lib.ntut.edu.tw` (a browser session cookie; the server side was seen with a 2 h lifetime). Cookies the proxy sets on the way — one set per publisher host, and the ones it rewrites onto a parent of its own domain — are kept in the store too, so the next paper skips the handshake.
+- Browsers: `--from-browser` reads the browser's cookie database with yt-dlp's extractor. It needs the database to be readable: Firefox works while running; Chrome and Edge on Windows encrypt with a key only they hold, and a Chromium that is running (Electron apps included) keeps the file locked. Then export a cookies.txt or use `--paste`.
 
 ## map — discover a site's URLs
 

@@ -27,6 +27,7 @@ import click
 import requests
 from rich.markup import escape
 
+from ..utils import institution
 from ..utils.cache import cache_key, read_cache, write_cache
 from ..utils.config import is_gateway
 from ..utils.output import Progress, SpinnerColumn, TextColumn, handle_output
@@ -1163,5 +1164,82 @@ def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool):
     out("No legal free copy found.")
     if doi:
         out(f"  Publisher page (usually abstract only): https://doi.org/{doi}")
-    out("  For the full text, download it with your own school or library access on your own computer.")
+    if institution.settings().get("enabled"):
+        out(f"  Through your library (institution proxy is on): fcrawl papers fetch {pid}")
+    else:
+        out("  For the full text, download it with your own school or library access on your own computer.")
+
+
+# --- fetch: the full text through the user's own library proxy ------------------------
+
+
+def _fetch_target(paper_id: str) -> tuple[str, str, bool]:
+    """(id or URL as given, publisher URL to fetch, needs_proxy). arXiv and PMC are free:
+    fetched directly, not through the proxy and not counted."""
+    raw = paper_id.strip()
+    if raw.startswith(("http://", "https://")):
+        host = _host(raw)
+        free = _under(host, ("arxiv.org", "ncbi.nlm.nih.gov"))
+        return raw, raw, not free
+    pid = normalize_id(raw)
+    kind, _, value = pid.partition(":")
+    if kind == "arxiv":
+        return pid, f"https://arxiv.org/pdf/{value}", False
+    if kind == "pmcid":
+        return pid, f"https://pmc.ncbi.nlm.nih.gov/articles/{value}/pdf/", False
+    if kind == "doi":
+        return pid, f"https://doi.org/{value}", True
+    raise click.BadParameter(f"{raw}: give a DOI, an arXiv/PMC id or the paper's URL", param_hint="ID")
+
+
+def _fetch_filename(label: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", label.split("://", 1)[-1]).strip("-.")[:120]
+    return (safe or "paper") + ".pdf"
+
+
+@papers.command("fetch")
+@click.argument("paper_id", metavar="ID_OR_URL")
+@click.option("-o", "--output", "output", default=None, type=click.Path(dir_okay=False),
+              help="Where to save the PDF (default: the fcrawl-saved/papers temp folder)")
+@click.option("--json", "json_output", is_flag=True, help="Output as JSON")
+def fetch_cmd(paper_id: str, output: Optional[str], json_output: bool):
+    """Download a paper's PDF through your own library proxy (fcrawl auth), to a local file.
+
+    \b
+    Needs `fcrawl auth enable <preset>` and a session from `fcrawl auth login`.
+    The request goes from this machine to the library proxy only, never through the
+    gateway or Firecrawl. Built-in limits: 20 papers a day, 10 per publisher, 30 s apart.
+    arXiv / PMC ids are free and are fetched directly.
+    """
+    from pathlib import Path
+
+    from ..utils.platform import tmp_root
+
+    label, target, needs_proxy = _fetch_target(paper_id)
+    out_path = Path(output) if output else tmp_root() / "fcrawl-saved" / "papers" / _fetch_filename(label)
+    try:
+        if needs_proxy:
+            preset = institution.active_preset()
+            store = institution.CookieStore.load(preset.id)
+            fetched = institution.fetch_pdf(preset, store, target, out_path,
+                                            note=lambda m: console.print(f"[dim]{escape(m)}[/dim]", highlight=False))
+            provider = f"institution:{preset.id}"
+        else:
+            fetched = institution.fetch_free_pdf(target, out_path)
+            provider = "direct"
+    except institution.InstitutionError as exc:
+        console.print(f"[red]Error: {escape(str(exc))}[/red]", highlight=False)
+        if json_output:
+            emit_json({"id": label, "ok": False, "error": str(exc)}, None)
+        else:
+            out(f"RESULT provider={'institution' if needs_proxy else 'direct'} url={target} status=failed")
+        raise click.Abort()
+    except requests.RequestException as exc:
+        console.print(f"[red]Error: {type(exc).__name__} while fetching {escape(target)}[/red]", highlight=False)
+        raise click.Abort()
+    if json_output:
+        emit_json({"id": label, "ok": True, "path": str(fetched.path), "bytes": fetched.size, "url": target,
+                   "pdfUrl": fetched.pdf_url, "provider": provider}, None)
+        return
+    out(f"RESULT path={fetched.path} provider={provider} url={target} status=ok bytes={fetched.size}")
 

@@ -98,6 +98,7 @@ fcrawl dev "error message" -t issue -t pull_request
 fcrawl papers "query"                  # titles, year, citations, abstract, PDF link
 fcrawl papers read arxiv:ID -q "..."   # the passages of one paper that answer a question
 fcrawl papers pdf doi:...              # a legal free copy, if one exists
+fcrawl papers fetch doi:...            # the PDF through your own library proxy (opt-in, see below)
 ```
 
 More: `map`, `resolve`, `cache`, `config`, `x diagnose`, and every flag, in [docs/commands.md](docs/commands.md). Any command also takes `--help`.
@@ -112,6 +113,10 @@ More: `map`, `resolve`, `cache`, `config`, `x diagnose`, and every flag, in [doc
 ## Using your own keys (direct mode)
 
 Without a gateway, fcrawl can call Firecrawl, Serper and X directly with your own keys, including a pool of several Firecrawl accounts. See [docs/direct-mode.md](docs/direct-mode.md).
+
+## Optional: your library's subscription
+
+Off by default. `fcrawl auth enable ntut`, then `fcrawl auth login`: it opens the library's login page, you log in there yourself (fcrawl never sees the password), and `fcrawl auth login --from-browser firefox` (or `--cookie-file`, `--paste`) hands the session cookies to fcrawl. From then on `fcrawl papers fetch doi:…` downloads paywalled PDFs through the proxy to a local file. The cookies stay on this machine, go to the proxy host only, and the command is rate limited (20 papers a day, 10 per publisher, 30 s apart). Built-in preset: `ntut` (Taipei Tech); other EZproxy/Hyweb libraries are a few lines in `.fcrawlrc` (`docs/commands.md`, `auth`).
 
 ## Optional: local transcription
 
