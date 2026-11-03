@@ -2,14 +2,16 @@
 
     fcrawl auth presets                      # which libraries fcrawl knows
     fcrawl auth enable ntut                  # turn the feature on (off by default)
-    fcrawl auth login                        # open the library login page in your browser, then
-    fcrawl auth login --from-browser firefox # hand the session cookies to fcrawl
-    fcrawl auth status                       # is the session alive? today's usage
+    fcrawl auth login                        # a browser window opens: log in there yourself
+    fcrawl auth status                       # is the session alive? today's usage and limits
     fcrawl auth logout / disable
 
-fcrawl never asks for the password: you log in yourself, in your own browser, captcha
-included. The cookies stay in ~/.fcrawl/institution/ (owner-only) and are only ever
-sent to the library proxy host, never to the gateway or Firecrawl.
+fcrawl never asks for the password: you log in yourself, captcha included, in a browser
+window fcrawl opens (a Chrome/Edge/Brave/Chromium already on the machine, with a fresh
+temporary profile). fcrawl reads the session cookies from that window over the DevTools
+protocol. Fallbacks: --cookie-file, --paste, --from-clipboard, --from-browser. The
+cookies stay in ~/.fcrawl/institution/ (owner-only) and are only ever sent, over https,
+to the library proxy host, never to the gateway or Firecrawl.
 """
 
 from __future__ import annotations
@@ -27,8 +29,12 @@ from ..utils.output import err_console as console
 
 
 def _fail(exc: Exception) -> None:
-    console.print(f"[red]Error: {exc}[/red]", highlight=False)
+    console.print(f"[red]Error: {exc}[/red]", highlight=False, markup=True)
     raise click.Abort()
+
+
+def _note(text: str) -> None:
+    console.print(text, highlight=False, markup=False)
 
 
 def _preset_or_fail(override: Optional[str]) -> inst.Preset:
@@ -57,11 +63,14 @@ def presets_cmd():
     current = inst.settings(cfg)
     for pid, p in inst.presets(cfg).items():
         mark = " (enabled)" if current["enabled"] and current["preset"] == pid else ""
-        click.echo(f"{pid}{mark}: {p.name}")
-        click.echo(f"  proxy: {p.proxy_host} ({p.style})")
+        exp = " [experimental: not verified against this library yet]" if p.experimental else ""
+        click.echo(f"{pid}{mark}: {p.name}{exp}")
+        click.echo(f"  proxy: {p.proxy_host} ({p.style}{', experimental' if p.style == 'prefix' else ''})")
         click.echo(f"  login: {p.login_page()}")
         if p.notes:
             click.echo(f"  note: {p.notes}")
+    for pid, why in inst.preset_errors(cfg).items():
+        click.echo(f"{pid}: IGNORED ({why})")
 
 
 @auth.command("enable")
@@ -90,58 +99,89 @@ def disable_cmd():
     click.echo(f"institution proxy disabled (preset kept: {written.get('preset') or 'none'})")
 
 
+def _read_header(from_clipboard: bool) -> str:
+    """The Cookie: header for --paste / --from-clipboard. From the clipboard, or from stdin
+    when it is not a terminal (`fcrawl auth login --paste < header.txt`), or hidden typed
+    input. A terminal's line buffer (about 1 KB on macOS) cuts long pastes short: the
+    clipboard has no such limit."""
+    if from_clipboard:
+        import pyperclip
+
+        try:
+            text = pyperclip.paste() or ""
+        except Exception as exc:  # no clipboard tool (headless Linux)
+            raise inst.InstitutionError(f"cannot read the clipboard ({type(exc).__name__}); use --paste") from None
+        if not text.strip():
+            raise inst.InstitutionError("the clipboard is empty; copy the Cookie header value first")
+        return text
+    if not sys.stdin.isatty():
+        return sys.stdin.read()
+    text = click.prompt("Cookie header value (hidden; for long values use --from-clipboard)", hide_input=True)
+    if len(text) in range(1000, 1100):
+        _note("note: that is about the size a terminal cuts a paste at; if the session check fails, "
+              "use --from-clipboard")
+    return text
+
+
 @auth.command("login")
 @click.option("--preset", "preset_id", default=None, help="Preset id (default: the enabled one)")
+@click.option("--browser", "browser_name", default=None, metavar="NAME|PATH",
+              help="Which browser opens the login window: edge, chrome, brave, chromium, or a path")
+@click.option("--timeout", "timeout", default=600, show_default=True, type=click.IntRange(30, 3600),
+              help="Seconds to wait for you to finish logging in")
 @click.option("--from-browser", "browser", default=None, metavar="BROWSER[:PROFILE]",
-              help="Take the cookies from this browser's cookie store: firefox, chrome, edge, brave, "
-                   "chromium, vivaldi, opera, safari, whale (Chrome/Edge on Windows: see note)")
+              help="Fallback: read the cookies from a browser's own cookie store (firefox, chrome, edge, …); "
+                   "often fails for session cookies and on Windows Chrome/Edge")
 @click.option("--cookie-file", "cookie_file", default=None, type=click.Path(exists=True, dir_okay=False),
-              help="A Netscape cookies.txt exported from the browser after logging in")
-@click.option("--paste", is_flag=True, help="Paste the Cookie: header value from the browser's dev tools")
-@click.option("--no-open", is_flag=True, help="Do not open the login page in a browser")
-def login_cmd(preset_id: Optional[str], browser: Optional[str], cookie_file: Optional[str], paste: bool,
-              no_open: bool):
-    """Log in to the library in your browser, then hand the session cookies to fcrawl.
+              help="Fallback: a Netscape cookies.txt exported from the browser after logging in")
+@click.option("--paste", is_flag=True, help="Fallback: paste the Cookie: header value (hidden input, or stdin)")
+@click.option("--from-clipboard", "from_clipboard", is_flag=True,
+              help="Fallback: take the Cookie: header value from the clipboard")
+@click.option("--no-open", is_flag=True, help="Do not open any browser: print the login page and the fallbacks")
+def login_cmd(preset_id: Optional[str], browser_name: Optional[str], timeout: int, browser: Optional[str],
+              cookie_file: Optional[str], paste: bool, from_clipboard: bool, no_open: bool):
+    """Log in to the library in a browser window fcrawl opens; fcrawl keeps the session cookies.
 
     \b
-    Step 1 (no capture option): opens the login page. Log in there as yourself.
-    Step 2: run again with one of --from-browser, --cookie-file or --paste.
+    Default: opens a fresh window of the Chrome/Edge/Brave/Chromium on this machine.
+    Log in there as yourself (captcha included); the window closes by itself when the
+    library session exists. fcrawl never sees your password.
+    No such browser, or it fails: --cookie-file, --paste, --from-clipboard or --from-browser.
     """
     preset = _preset_or_fail(preset_id)
-    captures = [x for x in (browser, cookie_file, paste) if x]
+    captures = [x for x in (browser, cookie_file, paste, from_clipboard) if x]
     if len(captures) > 1:
-        raise click.BadParameter("use one of --from-browser, --cookie-file, --paste")
-    if not captures:
-        url = preset.login_page()
-        click.echo(f"login page: {url}")
-        if not no_open:
-            try:
-                webbrowser.open(url)
-            except Exception:
-                pass
-        click.echo("log in there as yourself (fcrawl never takes your password), then hand over the cookies:")
-        click.echo("  fcrawl auth login --from-browser firefox      # or edge, chrome, …")
-        click.echo("  fcrawl auth login --cookie-file cookies.txt   # exported by a 'Get cookies.txt' extension")
-        click.echo("  fcrawl auth login --paste                     # Cookie: header from the dev tools")
-        if sys.platform == "win32":
-            click.echo("note: on Windows, Chrome and Edge encrypt their cookies so only they can read them; "
-                       "Firefox works, or use --cookie-file / --paste.")
-        return
+        raise click.BadParameter("use one of --from-browser, --cookie-file, --paste, --from-clipboard")
 
     try:
         if browser:
             name, _, profile = browser.partition(":")
-            cookies = inst.cookies_from_browser(preset, name.strip().lower(), profile.strip() or None)
+            cookies = inst.cookies_from_browser(preset, name.strip().lower(), profile.strip() or None, warn=_note)
             source = name.strip().lower()
         elif cookie_file:
             cookies = inst.cookies_from_file(preset, cookie_file)
             source = "file"
+        elif paste or from_clipboard:
+            cookies = inst.cookies_from_header(preset, _read_header(from_clipboard))
+            source = "clipboard" if from_clipboard else "paste"
+        elif no_open:
+            _manual_instructions(preset, open_page=False)
+            return
         else:
-            header = click.prompt("Cookie header value", hide_input=True)
-            cookies = inst.cookies_from_header(preset, header)
-            source = "paste"
+            from ..utils import browser_login
+
+            try:
+                cookies, used = browser_login.browser_login(preset, browser_name, timeout, note=_note)
+            except browser_login.BrowserNotFound as exc:
+                _note(f"{exc}")
+                _manual_instructions(preset, open_page=True)
+                return
+            source = f"browser-window:{used}"
     except inst.InstitutionError as exc:
         _fail(exc)
+        return
+    except KeyboardInterrupt:
+        _fail(inst.InstitutionError("login cancelled"))
         return
     store = inst.CookieStore(preset.id, cookies, captured=inst.iso_now(), source=source)
     path = store.save()
@@ -155,12 +195,28 @@ def login_cmd(preset_id: Optional[str], browser: Optional[str], cookie_file: Opt
         click.echo("the login may not have finished, or the cookies are from before it; log in again and re-run")
 
 
+def _manual_instructions(preset: inst.Preset, open_page: bool) -> None:
+    url = preset.login_page()
+    click.echo(f"login page: {url}")
+    if open_page:
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+    click.echo("log in there as yourself (fcrawl never takes your password), then hand over the cookies:")
+    click.echo("  fcrawl auth login --cookie-file cookies.txt   # exported by a 'Get cookies.txt' extension")
+    click.echo("  fcrawl auth login --from-clipboard            # Cookie: header value copied from the dev tools")
+    click.echo("  fcrawl auth login --paste                     # same, typed/pasted (hidden; short values only)")
+    click.echo("  fcrawl auth login --from-browser firefox      # the browser's cookie store (untested fallback; "
+               "session cookies may be missing)")
+
+
 @auth.command("status")
 @click.option("--preset", "preset_id", default=None, help="Preset id (default: the enabled one)")
 @click.option("--no-probe", is_flag=True, help="Do not contact the proxy; local state only")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def status_cmd(preset_id: Optional[str], no_probe: bool, json_output: bool):
-    """Is the session alive, what is on file, how much of today's quota is used."""
+    """Is the session alive, what is on file, today's usage and the limits in force."""
     cfg = load_config()
     conf = inst.settings(cfg)
     try:
@@ -169,23 +225,27 @@ def status_cmd(preset_id: Optional[str], no_probe: bool, json_output: bool):
         _fail(exc)
         return
     store = inst.CookieStore.load(preset.id)
-    usage = inst.Usage.load(preset.id)
+    lim = inst.limits(preset.id, cfg)
+    for n in lim.notes:
+        _note(n)
+    usage = inst.Usage.load(preset.id, lim)
     today = date.today().isoformat()
     used_today = usage.total if usage.day == today else 0
     pubs_today = usage.publishers if usage.day == today else {}
     result = None if no_probe else inst.probe(preset, store)
     data = {
         "preset": preset.id, "enabled": conf["enabled"] and conf["preset"] == preset.id,
+        "experimental": preset.experimental or preset.style == "prefix",
         "proxyHost": preset.proxy_host, "cookies": sorted({c.name for c in store.cookies}),
         "cookieDomains": sorted({c.domain for c in store.cookies}), "captured": store.captured, "source": store.source,
         "soonestExpiry": store.soonest_expiry(), "session": result,
-        "usageToday": {"total": used_today, "limit": inst.DAILY_LIMIT, "publishers": pubs_today,
-                       "perPublisherLimit": inst.PUBLISHER_DAILY_LIMIT, "minSpacingSeconds": inst.MIN_SPACING},
+        "usageToday": {"total": used_today, "limit": lim.daily, "publishers": pubs_today,
+                       "perPublisherLimit": lim.per_publisher, "minSpacingSeconds": lim.spacing},
     }
     if json_output:
         import json
 
-        click.echo(json.dumps(data, indent=2))
+        click.echo(json.dumps(data, indent=2, ensure_ascii=False))
         return
     click.echo(f"preset: {preset.id} ({preset.name}) — {'enabled' if data['enabled'] else 'DISABLED'}")
     click.echo(f"proxy: {preset.proxy_host}")
@@ -197,9 +257,8 @@ def status_cmd(preset_id: Optional[str], no_probe: bool, json_output: bool):
         click.echo("cookies: none on file (fcrawl auth login)")
     if result is not None:
         click.echo(f"session: {'OK' if result['ok'] else 'NOT OK'} ({result['detail']})")
-    pubs = ", ".join(f"{k} {v}/{inst.PUBLISHER_DAILY_LIMIT}" for k, v in sorted(pubs_today.items())) or "none yet"
-    click.echo(f"today: {used_today}/{inst.DAILY_LIMIT} papers; per publisher: {pubs}; "
-               f"spacing: {inst.MIN_SPACING}s")
+    pubs = ", ".join(f"{k} {v}/{lim.per_publisher}" for k, v in sorted(pubs_today.items())) or "none yet"
+    click.echo(f"today: {used_today}/{lim.daily} papers; per publisher: {pubs}; spacing: {lim.spacing}s")
 
 
 @auth.command("logout")

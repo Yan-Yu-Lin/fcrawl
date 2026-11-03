@@ -13,7 +13,9 @@ dependencies = [
     "python-dotenv>=1.2.1",
     "requests>=2.32.5",
     "rich>=14.2.0",
+    "secretstorage>=3.3 ; sys_platform == 'linux'",
     "twscrape",
+    "websockets>=13",
     "yt-dlp>=2025.12.8",
 ]
 

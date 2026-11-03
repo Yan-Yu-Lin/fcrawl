@@ -129,3 +129,45 @@ def test_fetch_unwritable_output_is_one_line(env, tmp_path):
     blocker.write_text("x")
     res = run("papers", "fetch", "arxiv:1706.03762", "-o", str(blocker / "sub" / "a.pdf"))
     assert res.exit_code != 0 and "status=failed" in res.stdout and "cannot write the PDF" in res.output
+
+
+# --- N4: clipboard and stdin -------------------------------------------------------------
+
+
+def test_login_from_clipboard(env, monkeypatch):
+    web, _ = env
+    enable()
+    import pyperclip
+
+    long_value = "v" * 3000  # longer than a terminal line buffer
+    monkeypatch.setattr(pyperclip, "paste", lambda: f"HYSID={long_value}; JSESSIONID=j")
+    web.routes["https://ieeexplore-ieee-org.search.lib.ntut.edu.tw/Xplore/home.jsp"] = R(200, "<html>IEEE</html>")
+    res = run("auth", "login", "--from-clipboard")
+    assert res.exit_code == 0, res.output
+    assert "saved 2 cookie(s)" in res.output and long_value not in res.output
+    assert {c.name: c.value for c in I.CookieStore.load("ntut").cookies}["HYSID"] == long_value
+    monkeypatch.setattr(pyperclip, "paste", lambda: "")
+    assert "clipboard is empty" in run("auth", "login", "--from-clipboard").output
+
+
+def test_login_no_open_lists_the_fallbacks(env):
+    enable()
+    res = run("auth", "login", "--no-open")
+    assert res.exit_code == 0
+    assert "--from-clipboard" in res.output and "untested fallback" in res.output
+
+
+# --- C: auth status shows the limits in force -----------------------------------------------
+
+
+def test_status_shows_configured_limits(env):
+    _, tmp = env
+    enable()
+    rc = tmp / ".fcrawlrc"
+    cfg = json.loads(rc.read_text())
+    cfg["institution"]["limits"] = {"daily": 99, "spacing_seconds": 15}
+    rc.write_text(json.dumps(cfg))
+    res = run("auth", "status", "--no-probe")
+    assert "0/50 papers" in res.output and "spacing: 15s" in res.output and "hard ceiling" in res.output
+    data = json.loads(run("auth", "status", "--no-probe", "--json").stdout)
+    assert data["usageToday"]["limit"] == 50 and data["usageToday"]["minSpacingSeconds"] == 15
