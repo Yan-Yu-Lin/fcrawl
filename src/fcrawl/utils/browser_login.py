@@ -162,10 +162,29 @@ def profile_parent(browser: Browser) -> Path:
     return Path(tempfile.gettempdir())
 
 
+def headless() -> bool:
+    """FCRAWL_LOGIN_HEADLESS=1: no window (automated tests of the login flow on a machine
+    whose screen must not be touched). Useless for a real login: nobody can type into it."""
+    return os.environ.get("FCRAWL_LOGIN_HEADLESS", "").strip().lower() in ("1", "true", "yes")
+
+
+def has_display() -> bool:
+    """Can a browser window appear? Linux/BSD over ssh without DISPLAY / WAYLAND_DISPLAY
+    cannot show one (Windows and macOS always can)."""
+    if sys.platform in ("win32", "darwin"):
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def launch(browser: Browser, url: str, profile: Path) -> subprocess.Popen:
     args = [browser.path, f"--user-data-dir={profile}", "--remote-debugging-port=0",
             "--remote-allow-origins=http://127.0.0.1", "--no-first-run", "--no-default-browser-check",
-            "--disable-features=Translate", "--new-window", url]
+            "--disable-features=Translate", "--password-store=basic"]
+    if headless():
+        args += ["--headless=new", "--disable-gpu"]
+    else:
+        args.append("--new-window")
+    args.append(url)
     kw: dict[str, Any] = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
     if sys.platform == "win32":
         kw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
@@ -291,6 +310,9 @@ def browser_login(preset: Preset, browser: Optional[str] = None, timeout: float 
     whatever happens; InstitutionError if it cannot be."""
     from .institution import _keep
 
+    if not headless() and not has_display():
+        raise BrowserNotFound("no screen to show a browser window on (no DISPLAY / WAYLAND_DISPLAY: an ssh "
+                              "session?); log in on the machine's own desktop, or use --cookie-file / --paste")
     found = find_browsers(browser)
     if not found:
         raise BrowserNotFound("no Chrome, Edge, Brave or Chromium found" + (f" (asked for {browser})" if browser else "")

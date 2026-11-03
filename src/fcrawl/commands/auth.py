@@ -196,9 +196,13 @@ def login_cmd(preset_id: Optional[str], browser_name: Optional[str], timeout: in
 
 
 def _manual_instructions(preset: inst.Preset, open_page: bool) -> None:
+    from ..utils.browser_login import has_display
+
     url = preset.login_page()
     click.echo(f"login page: {url}")
-    if open_page:
+    # without a screen (ssh into Linux) webbrowser would start a text-mode browser in this
+    # terminal, or nothing useful: print the URL only
+    if open_page and has_display():
         try:
             webbrowser.open(url)
         except Exception:

@@ -200,10 +200,53 @@ def test_browser_login_timeout_and_closed_window(env, monkeypatch, tmp_path):
 def test_browser_not_found_falls_back_to_instructions(env, monkeypatch):
     enable()
     monkeypatch.setattr(B, "find_browsers", lambda which=None: [])
-    monkeypatch.setattr("webbrowser.open", lambda url: True)
+    monkeypatch.setattr(B, "has_display", lambda: True)
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
     res = run("auth", "login")
     assert res.exit_code == 0
     assert "no Chrome, Edge, Brave or Chromium found" in res.output and "--cookie-file" in res.output
+    assert len(opened) == 1
+
+
+def test_no_display_never_opens_anything(env, monkeypatch):
+    """ssh into Linux (no DISPLAY / WAYLAND_DISPLAY): no browser start, no webbrowser.open
+    (which would fall back to a text browser in the terminal), just the URL and fallbacks."""
+    enable()
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.delenv("FCRAWL_LOGIN_HEADLESS", raising=False)
+    monkeypatch.setattr(B.sys, "platform", "linux")
+    launched: list = []
+    monkeypatch.setattr(B, "launch", lambda *a: launched.append(a))
+    opened: list[str] = []
+    monkeypatch.setattr("webbrowser.open", lambda url: opened.append(url) or True)
+    res = run("auth", "login")
+    assert res.exit_code == 0, res.output
+    assert "no screen" in res.output and "login page:" in res.output
+    assert launched == [] and opened == []
+
+
+def test_headless_switch_changes_the_browser_arguments(monkeypatch, tmp_path):
+    seen: dict = {}
+
+    class P:
+        pass
+
+    def popen(args, **kw):
+        seen["args"] = args
+        return P()
+
+    monkeypatch.setattr(B.subprocess, "Popen", popen)
+    br = B.Browser("chromium", "/usr/bin/chromium")
+    monkeypatch.delenv("FCRAWL_LOGIN_HEADLESS", raising=False)
+    B.launch(br, "https://x.example/", tmp_path)
+    assert "--new-window" in seen["args"] and not any(a.startswith("--headless") for a in seen["args"])
+    assert seen["args"][-1] == "https://x.example/"
+    monkeypatch.setenv("FCRAWL_LOGIN_HEADLESS", "1")
+    B.launch(br, "https://x.example/", tmp_path)
+    assert "--headless=new" in seen["args"] and "--new-window" not in seen["args"]
+    assert B.headless() and B.has_display() in (True, False)
 
 
 def test_auth_login_default_uses_the_browser_window(env, monkeypatch):
