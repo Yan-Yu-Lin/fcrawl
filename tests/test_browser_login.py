@@ -130,6 +130,7 @@ def fake_browser(monkeypatch, tmp_path, cdp):
         return cdp.logged_in()
 
     monkeypatch.setattr(B, "launch", launch)
+    monkeypatch.setattr(B, "has_display", lambda: True)  # the suite also runs over ssh
     monkeypatch.setattr(B, "CDP", lambda url: cdp)
     monkeypatch.setattr(B, "POLL_SECONDS", 0)
     monkeypatch.setattr(B, "VERIFY_EVERY", 0)
@@ -385,6 +386,7 @@ def test_profile_removed_when_the_browser_cannot_start(env, monkeypatch, tmp_pat
     exe = tmp_path / "chrome"
     exe.write_text("")  # not executable
     monkeypatch.setattr(B, "profile_parent", lambda b: tmp_path)
+    monkeypatch.setattr(B, "has_display", lambda: True)
     with pytest.raises(I.InstitutionError, match="cannot start"):
         B.browser_login(NTUT, str(exe), timeout=5)
     assert not list(tmp_path.glob("fcrawl-login-*"))
