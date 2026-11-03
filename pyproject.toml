@@ -15,7 +15,7 @@ dependencies = [
     "rich>=14.2.0",
     "secretstorage>=3.3 ; sys_platform == 'linux'",
     "twscrape",
-    "websockets>=13",
+    "websockets>=15",
     "yt-dlp>=2025.12.8",
 ]
 

@@ -14,7 +14,7 @@ import requests
 
 from fcrawl.utils import browser_login as B
 from fcrawl.utils import institution as I
-from test_institution import PDF, R, enable, run
+from test_institution import PDF, R, enable, run, store_with
 from test_institution import env as _env_fixture
 
 env = _env_fixture
@@ -32,25 +32,21 @@ def cdp_cookie(name, value, domain, session=True):
 
 
 HYSID = cdp_cookie("HYSID", "v", ".search.lib.ntut.edu.tw")
-PRE = frozenset({("HYSID", "search.lib.ntut.edu.tw", "pre")})
 
 
-@pytest.mark.parametrize("cookies,urls,before,done", [
-    ([], ["https://search.lib.ntut.edu.tw/ntut/oauth.jsp?login=true"], frozenset(), False),
-    ([HYSID], ["https://search.lib.ntut.edu.tw/ntut/LoginCheck.jsp?uid=1&pass=2"], frozenset(), False),  # token hop
-    ([HYSID], ["https://nportal.ntut.edu.tw/oauth2Server.do"], frozenset(), False),
-    ([HYSID], ["https://ieeexplore-ieee-org.search.lib.ntut.edu.tw/Xplore/home.jsp"], frozenset(), True),
-    # after LoginCheck the ntut proxy forwards to the unproxied publisher: still done
-    ([HYSID], ["https://ieeexplore.ieee.org/Xplore/home.jsp"], frozenset(), True),
-    ([HYSID], ["about:blank"], frozenset(), False),
-    # the pre-login cookie of the same name (host-only, set before the portal) is not a login
-    ([cdp_cookie("HYSID", "pre", "search.lib.ntut.edu.tw")], ["https://ieeexplore.ieee.org/x"], PRE, False),
-    ([cdp_cookie("HYSID", "pre", "search.lib.ntut.edu.tw"), HYSID], ["https://ieeexplore.ieee.org/x"], PRE, True),
-    ([cdp_cookie("HYSID", "v", ".evil.example")], ["https://ieeexplore.ieee.org/x"], frozenset(), False),
-    ([cdp_cookie("JSESSIONID", "v", "search.lib.ntut.edu.tw")], ["https://ieeexplore.ieee.org/x"], frozenset(), False),
+@pytest.mark.parametrize("cookies,urls,candidate", [
+    ([], ["https://search.lib.ntut.edu.tw/ntut/oauth.jsp?login=true"], False),
+    ([HYSID], ["https://search.lib.ntut.edu.tw/ntut/LoginCheck.jsp?uid=1&pass=2"], False),  # token hop
+    ([HYSID], ["https://nportal.ntut.edu.tw/oauth2Server.do"], False),
+    ([HYSID], ["https://ieeexplore-ieee-org.search.lib.ntut.edu.tw/Xplore/home.jsp"], True),
+    # after LoginCheck the ntut proxy forwards to the unproxied publisher: still a candidate
+    ([HYSID], ["https://ieeexplore.ieee.org/Xplore/home.jsp"], True),
+    ([HYSID], ["about:blank"], False),
+    ([cdp_cookie("HYSID", "v", ".evil.example")], ["https://ieeexplore.ieee.org/x"], False),
+    ([cdp_cookie("JSESSIONID", "v", "search.lib.ntut.edu.tw")], ["https://ieeexplore.ieee.org/x"], False),
 ])
-def test_login_done(cookies, urls, before, done):
-    assert B.login_done(NTUT, cookies, urls, before) is done
+def test_login_candidate(cookies, urls, candidate):
+    assert B.login_candidate(NTUT, cookies, urls) is candidate
 
 
 def test_cdp_cookie_conversion():
@@ -67,27 +63,31 @@ def test_find_browsers_by_path(tmp_path):
 
 
 class FakeCDP:
-    """Answers like a browser: after `ready_after` polls the user has logged in."""
+    """Answers like a browser: a pre-login HYSID on a non-login page first (a candidate
+    the proxy refuses), after `ready_after` polls the logged-in HYSID. `rotate=False`: the
+    proxy keeps the same HYSID value and only accepts it server-side after the login."""
 
-    def __init__(self, ready_after=2):
+    def __init__(self, ready_after=2, rotate=True):
         self.polls = 0
         self.ready_after = ready_after
+        self.rotate = rotate
         self.closed = False
         self.calls: list[str] = []
+
+    def logged_in(self):
+        return self.polls >= self.ready_after
 
     def call(self, method, params=None, timeout=10):
         self.calls.append(method)
         if method == "Storage.getCookies":
             self.polls += 1
-            if self.polls < self.ready_after:
-                return {"cookies": [cdp_cookie("HYSID", "pre-login", ".search.lib.ntut.edu.tw"),
-                                    cdp_cookie("NPORTAL", "p", "nportal.ntut.edu.tw")]}
-            return {"cookies": [cdp_cookie("HYSID", "after-login", ".search.lib.ntut.edu.tw"),
+            value = "after-login" if self.logged_in() and self.rotate else "pre-login"
+            return {"cookies": [cdp_cookie("HYSID", value, ".search.lib.ntut.edu.tw"),
                                 cdp_cookie("NPORTAL", "p", "nportal.ntut.edu.tw"),
                                 cdp_cookie("GA", "g", ".ntut.edu.tw")]}
         if method == "Target.getTargets":
-            url = ("https://nportal.ntut.edu.tw/oauth2Server.do" if self.polls < self.ready_after
-                   else "https://ieeexplore-ieee-org.search.lib.ntut.edu.tw/Xplore/home.jsp")
+            url = ("https://ieeexplore-ieee-org.search.lib.ntut.edu.tw/Xplore/home.jsp" if self.logged_in()
+                   else "https://search.lib.ntut.edu.tw/ntut/index.jsp")  # a non-login page before login
             return {"targetInfos": [{"type": "page", "url": url}]}
         return {}
 
@@ -123,10 +123,19 @@ def fake_browser(monkeypatch, tmp_path, cdp):
         (profile / "Cookies").write_text("secret browser state")
         return FakeProc()
 
+    verified: list[str] = []
+
+    def verify(preset, cookies):  # the proxy accepts the session only once the user logged in
+        verified.append({c.name: c.value for c in cookies}.get("HYSID"))
+        return cdp.logged_in()
+
     monkeypatch.setattr(B, "launch", launch)
     monkeypatch.setattr(B, "CDP", lambda url: cdp)
     monkeypatch.setattr(B, "POLL_SECONDS", 0)
+    monkeypatch.setattr(B, "VERIFY_EVERY", 0)
+    monkeypatch.setattr(B, "verify", verify)
     monkeypatch.setattr(B, "profile_parent", lambda b: tmp_path)
+    launched["verified"] = verified
     return str(exe), launched
 
 
@@ -134,12 +143,35 @@ def test_browser_login_waits_keeps_only_proxy_cookies_and_cleans_up(env, monkeyp
     cdp = FakeCDP(ready_after=3)
     exe, launched = fake_browser(monkeypatch, tmp_path, cdp)
     notes: list[str] = []
+    store_with(value="old-good-session")  # a session already on file
     cookies, name = B.browser_login(NTUT, exe, timeout=30, note=notes.append)
     assert {c.name: c.value for c in cookies} == {"HYSID": "after-login"}  # portal/GA cookies dropped
     assert cdp.polls == 3 and "Browser.close" in cdp.calls and cdp.closed
+    # the pre-login cookie was a candidate the proxy refused; the window stayed open
+    assert launched["verified"] == ["pre-login", "pre-login", "after-login"]
+    # browser_login itself never touches the session on file (auth login saves the result)
+    assert {c.name: c.value for c in I.CookieStore.load("ntut").cookies} == {"HYSID": "old-good-session"}
     assert launched["url"].startswith("https://search.lib.ntut.edu.tw/ntut/oauth.jsp")
     assert not launched["profile"].exists()  # the temp profile (with the cookies) is gone
     assert not any("nportal" in n or "ieeexplore" in n for n in notes)  # no browser URL is ever echoed
+
+
+def test_browser_login_accepts_a_cookie_that_does_not_rotate(env, monkeypatch, tmp_path):
+    cdp = FakeCDP(ready_after=3, rotate=False)
+    exe, launched = fake_browser(monkeypatch, tmp_path, cdp)
+    cookies, _ = B.browser_login(NTUT, exe, timeout=30)
+    assert {c.name: c.value for c in cookies} == {"HYSID": "pre-login"}  # same value, now accepted
+    assert launched["verified"][-1] == "pre-login" and len(launched["verified"]) == 3
+
+
+def test_verify_probes_without_saving(env):
+    web, _ = env
+    home = "https://ieeexplore-ieee-org.search.lib.ntut.edu.tw/Xplore/home.jsp"
+    web.routes[home] = R(200, "<html>IEEE</html>", cookies=[("ERIGHTS", "x", ".ieeexplore-ieee-org.search.lib.ntut.edu.tw")])
+    assert B.verify(NTUT, [I.Cookie("HYSID", "v", ".search.lib.ntut.edu.tw")]) is True
+    assert not I.CookieStore.path_for("ntut").exists()  # nothing written for a candidate
+    web.routes[home] = R(302, headers={"Location": "https://search.lib.ntut.edu.tw/login?url=x"})
+    assert B.verify(NTUT, [I.Cookie("HYSID", "v", ".search.lib.ntut.edu.tw")]) is False
 
 
 def test_browser_login_timeout_and_closed_window(env, monkeypatch, tmp_path):
@@ -268,3 +300,93 @@ def test_local_http_preset_end_to_end(env, monkeypatch):
                     f"http://127.0.0.1:{port}/paper.pdf", env[1] / "q.pdf", lim=I.Limits(20, 10, 10),
                     sleep=lambda s: None)
     srv.shutdown()
+
+
+# --- cleanup: the temporary profile never stays behind ---------------------------------
+
+
+class StubbornProc(FakeProc):
+    """wait() times out, terminate() raises (as on an already-exited Windows process)."""
+
+    def wait(self, timeout=None):
+        import subprocess
+
+        if self.done:
+            return 0
+        raise subprocess.TimeoutExpired("browser", timeout)
+
+    def terminate(self):
+        raise PermissionError("access denied")
+
+    def kill(self):
+        self.done = True
+
+
+def test_profile_removed_when_terminate_raises(env, monkeypatch, tmp_path):
+    cdp = FakeCDP(ready_after=10**9)
+    exe, launched = fake_browser(monkeypatch, tmp_path, cdp)
+
+    def launch(browser, url, profile):
+        launched["profile"] = profile
+        (profile / "DevToolsActivePort").write_text("12345\n/devtools/browser/abc\n")
+        return StubbornProc()
+
+    monkeypatch.setattr(B, "launch", launch)
+    monkeypatch.setattr(B, "POLL_SECONDS", 0.01)
+    with pytest.raises(B.LoginTimeout):
+        B.browser_login(NTUT, exe, timeout=0.1)
+    assert not launched["profile"].exists()
+
+
+def test_profile_removed_when_the_browser_cannot_start(env, monkeypatch, tmp_path):
+    exe = tmp_path / "chrome"
+    exe.write_text("")  # not executable
+    monkeypatch.setattr(B, "profile_parent", lambda b: tmp_path)
+    with pytest.raises(I.InstitutionError, match="cannot start"):
+        B.browser_login(NTUT, str(exe), timeout=5)
+    assert not list(tmp_path.glob("fcrawl-login-*"))
+
+
+def test_profile_that_cannot_be_deleted_is_reported(tmp_path, monkeypatch):
+    prof = tmp_path / "fcrawl-login-x"
+    prof.mkdir()
+    monkeypatch.setattr(B.shutil, "rmtree", lambda *a, **k: None)
+    monkeypatch.setattr(B.time, "sleep", lambda s: None)
+    with pytest.raises(I.InstitutionError, match="delete it yourself"):
+        B._remove_profile(prof)
+
+
+def test_stop_tolerates_an_exited_process():
+    class Gone(FakeProc):
+        def wait(self, timeout=None):
+            import subprocess
+
+            raise subprocess.TimeoutExpired("b", timeout)
+
+        def terminate(self):
+            self.done = True
+            raise ProcessLookupError()
+
+        def poll(self):
+            return 0 if self.done else None
+
+    B._stop(Gone())  # no exception
+
+
+# --- snap Chromium ---------------------------------------------------------------------
+
+
+def test_snap_detection_and_profile_place(tmp_path, monkeypatch):
+    wrapper = tmp_path / "chromium-browser"
+    wrapper.write_text("#!/bin/sh\nexec /snap/bin/chromium \"$@\"\n")
+    assert B.snap_name(str(wrapper)) == "chromium"
+    assert B.snap_name("/snap/bin/brave") == "brave"
+    plain = tmp_path / "google-chrome"
+    plain.write_text("#!/bin/sh\nexec /opt/google/chrome/chrome \"$@\"\n")
+    assert B.snap_name(str(plain)) is None
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("FCRAWL_STATE_DIR", "/tmp/somewhere-else")
+    monkeypatch.setattr(B.Path, "home", staticmethod(lambda: tmp_path))
+    d = B.profile_parent(B.Browser("chromium", str(wrapper), snap=True, snap_name="chromium"))
+    assert d == tmp_path / "snap" / "chromium" / "common" / "fcrawl-login"  # not hidden, not under the state dir
+    assert B.profile_parent(B.Browser("chrome", str(plain))) == B.Path(B.tempfile.gettempdir())

@@ -44,7 +44,7 @@ Dependencies worth knowing: `firecrawl-py` and `twscrape` are pinned to Arthur's
 ## Tests and lint
 
 ```bash
-uv run --with pytest python -m pytest -q     # 314 tests, all offline
+uv run --with pytest python -m pytest -q     # 342 tests, all offline
 uvx ruff check src tests                     # config in pyproject: pyflakes + syntax only
 ```
 
@@ -69,4 +69,4 @@ Smoke tests against the live gateway cost real credits (search 1 Serper credit, 
 - `papers` Research Index calls (search/show/read/related) and the `papers pdf` OA lookups (OpenAlex, Semantic Scholar) go directly from the client, keyless; only Scholar goes through the gateway (`/gw/search` type scholar).
 - `scrape -f extract` is a leftover format option, untested against the gateway.
 - With no `.fcrawlrc`, `api_url` defaults to `http://localhost:3002` (self-hosted Firecrawl), and a newcomer sees "connection refused".
-- Institution proxy, not done yet: publisher hosts that contain a `-` (EZproxy writes it `--`; unknown whether Hyweb does) break hostname rewriting/`_unproxy`; cookie `path` is ignored when sending; `auth status` probes every time (no cache); the `prefix` style is untested against a real library. Arc cannot host the login window (no DevTools port). The live ntut checks are done by an NTUT student, not here: nobody on this side has a login.
+- Institution proxy, not done yet: publisher hosts that contain a `-` (EZproxy writes it `--`; unknown whether Hyweb does) break hostname rewriting/`_unproxy`; cookie `path` is ignored when sending; `auth status` probes every time (no cache); the `prefix` style is untested against a real library. Arc cannot host the login window (no DevTools port); the snap-Chromium profile place (`~/snap/<name>/common`) is untested on Linux. The live ntut checks are done by an NTUT student, not here: nobody on this side has a login.
