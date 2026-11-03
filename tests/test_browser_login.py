@@ -243,7 +243,7 @@ def test_local_http_preset_end_to_end(env, monkeypatch):
             seen.append((self.headers.get("Host", "").split(":")[0], self.headers.get("Cookie") or ""))
             if "HYSID=ok" not in (self.headers.get("Cookie") or ""):
                 self.send_response(302)
-                self.send_header("Location", f"http://localhost:{self.server.server_address[1]}/login?url=x")
+                self.send_header("Location", f"http://127.0.0.1:{self.server.server_address[1]}/login?url=x")
                 self.end_headers()
                 return
             self.send_response(200)
@@ -256,15 +256,15 @@ def test_local_http_preset_end_to_end(env, monkeypatch):
     port = srv.server_address[1]
     monkeypatch.setattr(I, "http_get", lambda url, cookies, timeout, stream=False: requests.get(
         url, cookies=cookies or None, allow_redirects=False, timeout=timeout, stream=stream))
-    preset = I.Preset(id="local", name="local", proxy_host="localhost", style="hostname",
-                      login_url=f"http://localhost:{port}/start?url={{url}}", login_marker=f"http://localhost:{port}/login?url=",
+    preset = I.Preset(id="local", name="local", proxy_host="127.0.0.1", style="hostname",
+                      login_url=f"http://127.0.0.1:{port}/start?url={{url}}", login_marker=f"http://127.0.0.1:{port}/login?url=",
                       session_cookie="HYSID", scheme="http", port=port)
-    store = I.CookieStore("local", [I.Cookie("HYSID", "ok", "localhost", secure=False)])
-    got = I.fetch_pdf(preset, store, f"http://localhost:{port}/paper.pdf", env[1] / "p.pdf",
+    store = I.CookieStore("local", [I.Cookie("HYSID", "ok", "127.0.0.1", secure=False)])
+    got = I.fetch_pdf(preset, store, f"http://127.0.0.1:{port}/paper.pdf", env[1] / "p.pdf",
                       lim=I.Limits(20, 10, 10), sleep=lambda s: None)
-    assert got.size == len(PDF) and seen[-1] == ("localhost", "HYSID=ok")
+    assert got.size == len(PDF) and seen[-1] == ("127.0.0.1", "HYSID=ok")
     with pytest.raises(I.NotLoggedIn):
-        I.fetch_pdf(preset, I.CookieStore("local", [I.Cookie("HYSID", "bad", "localhost")]),
-                    f"http://localhost:{port}/paper.pdf", env[1] / "q.pdf", lim=I.Limits(20, 10, 10),
+        I.fetch_pdf(preset, I.CookieStore("local", [I.Cookie("HYSID", "bad", "127.0.0.1")]),
+                    f"http://127.0.0.1:{port}/paper.pdf", env[1] / "q.pdf", lim=I.Limits(20, 10, 10),
                     sleep=lambda s: None)
     srv.shutdown()

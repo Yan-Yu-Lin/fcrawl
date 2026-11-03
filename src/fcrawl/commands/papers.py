@@ -1143,9 +1143,11 @@ def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool, 
     if not confirmed_free and not no_institution:
         inst = _pdf_through_institution(pid, doi)
     if json_output:
-        emit_json({"id": pid, "title": title, "found": bool(cands), "candidates": cands, "notes": notes,
-                   "doiUrl": f"https://doi.org/{doi}" if doi else None, "scholarCredits": scholar_credits,
-                   "institution": inst}, None)
+        data = {"id": pid, "title": title, "found": bool(cands), "candidates": cands, "notes": notes,
+                "doiUrl": f"https://doi.org/{doi}" if doi else None, "scholarCredits": scholar_credits}
+        if inst is not None:  # only when the library proxy is on and was considered
+            data["institution"] = inst
+        emit_json(data, None)
         return
     head = title or pid
     if work.get("year"):
@@ -1194,7 +1196,7 @@ def _pdf_through_institution(pid: str, doi: Optional[str]) -> Optional[dict]:
     command = f"fcrawl papers fetch {label}"
     try:
         preset = institution.active_preset()
-        if not institution.CookieStore.load(preset.id).live():
+        if not institution.CookieStore.load(preset.id).live(preset):
             return {"tried": False, "ok": False, "command": command,
                     "error": "no library session on file: the user has to run `fcrawl auth login` themselves "
                              "(it opens a browser window; never ask for their password)"}

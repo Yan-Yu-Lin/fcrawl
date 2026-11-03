@@ -32,6 +32,7 @@ import json
 import os
 import re
 import stat
+import string
 import sys
 import tempfile
 import time
@@ -83,6 +84,27 @@ class NeedsBrowser(InstitutionError):
     "preparing your download" page): no HTTP client gets past it, a browser does."""
 
 
+# --- URLs that cookies may follow ----------------------------------------------------
+
+
+_PLAIN_NETLOC = re.compile(r"[A-Za-z0-9.\-]+(?::\d{1,5})?")
+
+
+def plain_url(url: str) -> bool:
+    """An http(s) URL whose host every parser agrees on: no userinfo (`user@`), no
+    backslash, no whitespace or control character, a host of letters, digits, dots and
+    dashes, an optional numeric port. `https://evil.example\\@proxy/` reads as the proxy
+    to urllib but connects to evil.example in requests: such a URL never gets cookies."""
+    if not isinstance(url, str) or "\\" in url or any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        parts.port  # noqa: B018 -- raises ValueError for a bad port
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(_PLAIN_NETLOC.fullmatch(parts.netloc))
+
+
 # --- presets ---------------------------------------------------------------------
 
 
@@ -108,10 +130,10 @@ class Preset:
 
     def rewrite(self, url: str) -> str:
         """The proxy URL for a publisher URL. A URL already under the proxy is returned as is."""
+        if not plain_url(url):
+            raise InstitutionError(f"not a plain http(s) URL: {url[:80]!r}")
         parts = urlsplit(url)
         host = (parts.hostname or "").lower().rstrip(".")
-        if parts.scheme not in ("http", "https") or not host:
-            raise InstitutionError(f"not an http(s) URL: {url[:80]}")
         if self.under_proxy(host):
             return url
         if self.style == "prefix":
@@ -127,8 +149,12 @@ class Preset:
         return f":{self.port}" if self.port else ""
 
     def secure_url(self, url: str) -> bool:
-        """May cookies go with a request to this URL? https only (the test-only http preset
+        """May cookies go with a request to this URL? A plain URL (see plain_url: no
+        userinfo, backslash or control character that could make the HTTP library connect
+        to another host than the one checked here), https only (the test-only http preset
         aside), and only to the proxy host or a host under it."""
+        if not plain_url(url):
+            return False
         parts = urlsplit(url)
         return parts.scheme == self.scheme and self.under_proxy(parts.hostname or "")
 
@@ -185,13 +211,19 @@ def _preset_problem(p: Preset) -> Optional[str]:
         return "proxy_host must be a host name with at least three labels (ezproxy.lib.example.edu)"
     if "{url}" not in p.login_url:
         return "login_url must contain {url}"
+    try:
+        fields = [f for _, f, _, _ in string.Formatter().parse(p.login_url) if f is not None]
+        p.login_url.format(url="x")
+    except (ValueError, IndexError, KeyError):
+        return "login_url is not a valid template (only {url} may appear in braces)"
+    if fields != ["url"] * len(fields):
+        return "login_url may contain only the {url} placeholder"
     for name in ("login_url", "login_marker"):
         value = getattr(p, name).replace("{url}", "x")
-        parts = urlsplit(value)
-        if parts.scheme != "https" or not p.under_proxy(parts.hostname or ""):
-            return f"{name} must be an https URL on {p.proxy_host}"
-    if urlsplit(p.probe_url).scheme != "https":
-        return "probe_url must be https"
+        if not plain_url(value) or urlsplit(value).scheme != "https" or not p.under_proxy(urlsplit(value).hostname or ""):
+            return f"{name} must be a plain https URL on {p.proxy_host}"
+    if not plain_url(p.probe_url) or urlsplit(p.probe_url).scheme != "https":
+        return "probe_url must be a plain https URL"
     for d in p.extra_cookie_domains:
         d = d.lower().strip(".")
         if d.count(".") < 2 or not p.proxy_host.endswith("." + d):
@@ -235,7 +267,10 @@ def presets(config: Optional[dict] = None, errors: Optional[dict] = None) -> dic
             errors[pid] = "missing a required field (name, proxy_host, style, login_url, login_marker)"
             continue
         p = Preset(**{**p.__dict__, "proxy_host": p.proxy_host.lower().strip().rstrip(".")})
-        problem = _preset_problem(p)
+        try:
+            problem = _preset_problem(p)
+        except Exception as exc:  # one broken preset must not take the others down
+            problem = f"cannot be read ({type(exc).__name__})"
         if problem:
             errors[pid] = problem
             continue
@@ -509,9 +544,14 @@ class CookieStore:
                 out[c.name] = c.value
         return out
 
-    def live(self, now: Optional[float] = None) -> bool:
-        """Any unexpired cookie on file (a session cookie counts until the proxy says no)."""
-        return any(not c.expired(now) for c in self.cookies)
+    def live(self, preset: Preset, now: Optional[float] = None) -> bool:
+        """Is there a session worth a request (and a quota slot)? The preset's session
+        cookie (ntut: HYSID), non-empty, unexpired, on a domain the preset keeps; for a
+        preset without one, any such cookie. A browser session cookie counts until the
+        proxy says no: only the proxy can tell a revoked session."""
+        want = preset.session_cookie
+        return any(c.value and not c.expired(now) and preset.cookie_domain_ok(c.domain)
+                   and (c.name == want if want else True) for c in self.cookies)
 
     def soonest_expiry(self) -> Optional[int]:
         times = [c.expires for c in self.cookies if c.expires]
@@ -694,10 +734,7 @@ class Usage:
         if self.publishers.get(publisher, 0) >= lim.per_publisher:
             raise RateLimited(f"daily limit for {publisher} reached ({lim.per_publisher} papers per publisher "
                               "per day); try again tomorrow")
-        wait = self.last + lim.spacing - now
-        if wait > lim.spacing * (lim.daily + 1):
-            return float(lim.spacing)
-        return max(0.0, wait)
+        return self.check_spacing(now)
 
     def record(self, publisher: str, now: float, today: str) -> None:
         self._roll(today)
@@ -709,15 +746,29 @@ class Usage:
     @classmethod
     def reserve(cls, preset_id: str, publisher: str, now: float, lim: Optional[Limits] = None) -> float:
         """Count one paper and book its time slot, atomically across fcrawl processes:
-        under the state lock, read the file, check the limits, record the paper at
-        now + wait and write it back. Returns the wait; the caller sleeps it after the
-        lock is released, so parallel downloads queue up 'spacing' seconds apart."""
+        under the state lock, read the file, find the slot (spacing after the last one),
+        check the limits of the day that slot falls on, record the paper there and write
+        it back. Returns the wait; the caller sleeps it after the lock is released, so
+        parallel downloads queue up 'spacing' seconds apart. Counting by the slot's day
+        (not the day of asking) keeps a queue that runs past midnight inside tomorrow's
+        limit too; slots only move forward, so the day never rolls back."""
         with state_lock():
             usage = cls.load(preset_id, lim)
-            today = date.fromtimestamp(now).isoformat()
-            wait = usage.check(publisher, now, today)
-            usage.record(publisher, now + wait, today)
+            first_wait = usage.check_spacing(now)
+            slot_day = date.fromtimestamp(now + first_wait).isoformat()
+            if usage.day and slot_day < usage.day:
+                slot_day = usage.day  # the clock went back: keep counting on the booked day
+            wait = usage.check(publisher, now, slot_day)
+            usage.record(publisher, now + wait, slot_day)
         return wait
+
+    def check_spacing(self, now: float) -> float:
+        """The wait before the next slot, without the daily limits (see check)."""
+        lim = self.limits
+        wait = self.last + lim.spacing - now
+        if wait > lim.spacing * (lim.daily + 1):
+            return float(lim.spacing)
+        return max(0.0, wait)
 
 
 # --- HTTP through the proxy ---------------------------------------------------------------
@@ -762,6 +813,13 @@ def follow(preset: Preset, store: CookieStore, url: str, timeout: int, stream: b
         at_login = _is_login_url(preset, current)
         if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
             location = urljoin(current, resp.headers["Location"])
+            if not plain_url(location):
+                # userinfo, a backslash or a control character: parsers disagree about its host
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                raise InstitutionError(f"refusing a redirect to a malformed URL from {_host(current) or 'the proxy'}")
             loc = urlsplit(location)
             if preset.under_proxy(loc.hostname or "") and loc.scheme != preset.scheme:
                 # a downgrade to http on the proxy: go on over https (cookies never travel in
@@ -976,8 +1034,10 @@ def fetch_pdf(preset: Preset, store: CookieStore, url: str, out_path: Path, lim:
     """Download the PDF of a publisher URL (landing page, DOI link or direct PDF) through
     the proxy to out_path. Counts against the rate limits before the first byte (a
     failure counts too); no session on file costs nothing."""
-    if not store.live():
-        raise NotLoggedIn("no institution session on file; run: fcrawl auth login")
+    if not store.live(preset):
+        raise NotLoggedIn("no institution session on file" +
+                          (f" (no unexpired {preset.session_cookie} cookie)" if preset.session_cookie else "") +
+                          "; run: fcrawl auth login")
     get, clock, sleep = get or http_get, clock or time.time, sleep or time.sleep
     lim = lim or limits(preset.id)
     target_url = url
@@ -1096,14 +1156,19 @@ def _unproxy(preset: Preset, url: str) -> str:
 # --- status -------------------------------------------------------------------------------
 
 
-def probe(preset: Preset, store: CookieStore, get: Optional[Callable[..., requests.Response]] = None) -> dict:
+def probe(preset: Preset, store: CookieStore, get: Optional[Callable[..., requests.Response]] = None,
+          save: bool = True) -> dict:
     """Is the session alive? {'ok': bool, 'detail': str}. One request to the proxy, not
-    counted as a paper."""
+    counted as a paper. save=False: a candidate session (the browser login checking it
+    before replacing the one on file): cookies picked up stay in `store` only."""
     if not store.cookies:
         return {"ok": False, "detail": "no cookies on file (fcrawl auth login)"}
+    if not store.live(preset):
+        return {"ok": False, "detail": f"no unexpired {preset.session_cookie or 'session'} cookie on file "
+                                       "(fcrawl auth login)"}
     try:
         resp = follow(preset, store, preset.rewrite(preset.probe_url), PROBE_TIMEOUT, get=get)
-        if store.dirty:
+        if store.dirty and save:
             store.save(merge=True)
     except NotLoggedIn as exc:
         return {"ok": False, "detail": str(exc)}

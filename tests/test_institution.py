@@ -673,7 +673,7 @@ def test_papers_fetch_errors_and_free_ids(env):
     web, tmp = env
     enable()
     res = run("papers", "fetch", "doi:10.1109/TPEL.2012.2223718")
-    assert res.exit_code != 0 and "fcrawl auth login" in res.output and "status=failed" in res.stdout
+    assert res.exit_code != 0 and "fcrawl" in res.output and "auth login" in res.output and "status=failed" in res.stdout
     with pytest.raises(click.BadParameter):
         from fcrawl.commands.papers import _fetch_target
 

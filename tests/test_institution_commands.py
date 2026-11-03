@@ -65,7 +65,7 @@ def test_pdf_no_institution_flag_and_feature_off(env, no_free_copy):
     store_with()
     ieee_routes(web)
     res = run("papers", "pdf", f"doi:{DOI}", "--no-scholar", "--json")
-    assert json.loads(res.stdout)["institution"] is None  # off: never touched
+    assert "institution" not in json.loads(res.stdout)  # off: the JSON is the same as before the feature
     enable()
     res = run("papers", "pdf", f"doi:{DOI}", "--no-scholar", "--no-institution")
     assert "RESULT" not in res.stdout and web.calls == []
