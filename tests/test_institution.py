@@ -18,7 +18,7 @@ from fcrawl.cli import cli
 from fcrawl.utils import institution as I
 
 NTUT = I.BUILTIN_PRESETS["ntut"]
-PDF = b"%PDF-1.7\n%fake\n" + b"x" * 100
+PDF = b"%PDF-1.7\n%fake\n" + b"x" * 2000
 LANDING = ('<html><head><meta name="citation_title" content="T">'
            '<meta name="citation_pdf_url" content="https://link.springer.com/content/pdf/10.1007/s1.pdf">'
            '</head><body>abstract</body></html>')

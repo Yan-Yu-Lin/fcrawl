@@ -19,34 +19,44 @@ Two styles cover nearly every university:
 Built-in rate limits keep a session from looking like a bulk downloader, which is
 what gets a whole school cut off by a publisher: at most DAILY_LIMIT papers a day,
 PUBLISHER_DAILY_LIMIT per publisher, and MIN_SPACING seconds between two papers.
+`institution.limits` in .fcrawlrc (or `institution.presets.<id>.limits`) changes them,
+within the hard ceiling HARD_DAILY_MAX / HARD_MIN_SPACING. The usage file is shared by
+every fcrawl process on the machine and only touched under a file lock.
+
+Cookies go out over https only, to the proxy host and hosts under it.
 """
 
 from __future__ import annotations
 
-import http.cookiejar
 import json
 import os
 import re
 import stat
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 from urllib.parse import quote, urljoin, urlsplit
 
 import requests
 
-from .config import load_config, save_config
+from .config import load_config
+from .platform import exclusive_lock
 
 DAILY_LIMIT = 20
 PUBLISHER_DAILY_LIMIT = 10
 MIN_SPACING = 30  # seconds between two proxied paper downloads
+HARD_DAILY_MAX = 50  # a .fcrawlrc limit above this is lowered to it
+HARD_MIN_SPACING = 10  # a .fcrawlrc spacing below this is raised to it
 MAX_REDIRECTS = 8
 FETCH_TIMEOUT = 60
 PROBE_TIMEOUT = 20
 MAX_PDF_BYTES = 200 * 1024 * 1024
+MIN_PDF_BYTES = 1024  # a real paper is never this small; a login page served as "PDF" often is
 # Publishers answer python-requests' default agent with a block page
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/124.0.0.0 Safari/537.36")
@@ -86,6 +96,15 @@ class Preset:
     login_marker: str  # a redirect to a URL starting with this means "not logged in"
     probe_url: str = "https://ieeexplore.ieee.org/Xplore/home.jsp"
     notes: str = ""
+    session_cookie: str = ""  # the cookie a finished login sets (browser login waits for it)
+    # parents of proxy_host whose cookies are kept (the proxy may rewrite a publisher's
+    # cookie domain onto one); everything else above the proxy host is dropped
+    extra_cookie_domains: tuple[str, ...] = ()
+    experimental: bool = False  # not yet verified against a real library
+    # tests point a preset at a local http server; presets from .fcrawlrc are always
+    # https on the default port (presets() never sets these two)
+    scheme: str = "https"
+    port: int = 0
 
     def rewrite(self, url: str) -> str:
         """The proxy URL for a publisher URL. A URL already under the proxy is returned as is."""
@@ -102,20 +121,32 @@ class Preset:
         new_host = host.replace(".", "-") + "." + self.proxy_host
         path = parts.path or "/"
         query = f"?{parts.query}" if parts.query else ""
-        return f"https://{new_host}{path}{query}"
+        return f"{self.scheme}://{new_host}{self._port()}{path}{query}"
+
+    def _port(self) -> str:
+        return f":{self.port}" if self.port else ""
+
+    def secure_url(self, url: str) -> bool:
+        """May cookies go with a request to this URL? https only (the test-only http preset
+        aside), and only to the proxy host or a host under it."""
+        parts = urlsplit(url)
+        return parts.scheme == self.scheme and self.under_proxy(parts.hostname or "")
 
     def under_proxy(self, host: str) -> bool:
         host = host.lower().rstrip(".")
         return host == self.proxy_host or host.endswith("." + self.proxy_host)
 
     def cookie_domain_ok(self, domain: str) -> bool:
-        """A cookie domain worth keeping: the proxy host, a host under it, or a parent of it
-        (the proxy rewrites a publisher's Domain=.springer.com into a parent of its own
-        host, .lib.ntut.edu.tw for ntut). Sending is restricted separately, see for_host."""
+        """A cookie domain worth keeping: the proxy host, a host under it, or one of the
+        preset's extra_cookie_domains (the ntut proxy rewrites a publisher's
+        Domain=.springer.com into .lib.ntut.edu.tw, a parent of its own host). Other
+        parents (.ntut.edu.tw, .edu.tw) are dropped. Sending is restricted separately,
+        see CookieStore.for_host."""
         d = domain.lower().lstrip(".").rstrip(".")
         if not d or "." not in d:
             return False
-        return self.under_proxy(d) or self.proxy_host.endswith("." + d)
+        extra = {x.lower().lstrip(".").rstrip(".") for x in self.extra_cookie_domains}
+        return self.under_proxy(d) or d in extra
 
     def login_page(self, landing: Optional[str] = None) -> str:
         return self.login_url.format(url=quote(landing or self.probe_url, safe=""))
@@ -133,28 +164,80 @@ BUILTIN_PRESETS: dict[str, Preset] = {
         login_url="https://search.lib.ntut.edu.tw/ntut/oauth.jsp?login=true&url={url}",
         login_marker="https://search.lib.ntut.edu.tw/login?url=",
         notes="Hyweb 電子資源整合查詢系統; login is the campus portal (nportal) OAuth page with a captcha, "
-              "so log in in your own browser, then hand the cookies to fcrawl.",
+              "so you log in yourself, in a browser window fcrawl opens.",
+        session_cookie="HYSID",
+        extra_cookie_domains=(".lib.ntut.edu.tw",),
     ),
 }
 
-_PRESET_FIELDS = ("name", "proxy_host", "style", "login_url", "login_marker", "probe_url", "notes")
+_PRESET_FIELDS = ("name", "proxy_host", "style", "login_url", "login_marker", "probe_url", "notes", "session_cookie")
+_HOST = re.compile(r"(?=.{4,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}[a-z]{2,63}")
 
 
-def presets(config: Optional[dict] = None) -> dict[str, Preset]:
-    """Built-in presets plus the user's own from .fcrawlrc (institution.presets.<id>)."""
+def _preset_problem(p: Preset) -> Optional[str]:
+    """Why a .fcrawlrc preset is refused, or None. Every URL must be https and point at
+    the proxy (a preset decides where the cookies go), the proxy host needs three labels
+    or more (so it cannot claim a whole registry like edu.tw), the login marker must be
+    a real URL (an empty one makes every URL look like the login page)."""
+    if p.style not in ("hostname", "prefix"):
+        return "style must be hostname or prefix"
+    if not _HOST.fullmatch(p.proxy_host):
+        return "proxy_host must be a host name with at least three labels (ezproxy.lib.example.edu)"
+    if "{url}" not in p.login_url:
+        return "login_url must contain {url}"
+    for name in ("login_url", "login_marker"):
+        value = getattr(p, name).replace("{url}", "x")
+        parts = urlsplit(value)
+        if parts.scheme != "https" or not p.under_proxy(parts.hostname or ""):
+            return f"{name} must be an https URL on {p.proxy_host}"
+    if urlsplit(p.probe_url).scheme != "https":
+        return "probe_url must be https"
+    for d in p.extra_cookie_domains:
+        d = d.lower().strip(".")
+        if d.count(".") < 2 or not p.proxy_host.endswith("." + d):
+            return f"extra_cookie_domains: {d!r} must be a parent of {p.proxy_host} with at least three labels"
+    return None
+
+
+def preset_errors(config: Optional[dict] = None) -> dict[str, str]:
+    """{preset id: why it was ignored} for the user's .fcrawlrc presets (shown by auth presets)."""
+    errors: dict[str, str] = {}
+    presets(config, errors)
+    return errors
+
+
+def presets(config: Optional[dict] = None, errors: Optional[dict] = None) -> dict[str, Preset]:
+    """Built-in presets plus the user's own from .fcrawlrc (institution.presets.<id>).
+    A user preset cannot replace a built-in one; an invalid one is skipped (reason in
+    `errors` when given)."""
     out = dict(BUILTIN_PRESETS)
+    errors = errors if errors is not None else {}
     config = config if config is not None else load_config()
-    custom = (config.get("institution") or {}).get("presets") or {}
+    inst = config.get("institution") if isinstance(config.get("institution"), dict) else {}
+    custom = inst.get("presets") or {}
     if not isinstance(custom, dict):
         return out
     for pid, raw in custom.items():
-        if not isinstance(raw, dict) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", str(pid)):
+        pid = str(pid)
+        if pid in BUILTIN_PRESETS:
+            if isinstance(raw, dict) and set(raw) - {"limits"}:
+                errors[pid] = "a built-in preset cannot be redefined (only its limits can be set); pick another id"
             continue
+        if not isinstance(raw, dict) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", pid):
+            errors[pid] = "invalid id (a-z, 0-9, - and _) or not an object"
+            continue
+        extra = raw.get("extra_cookie_domains") or ()
         try:
-            p = Preset(id=str(pid), **{k: str(raw[k]) for k in _PRESET_FIELDS if k in raw})
+            p = Preset(id=pid, **{k: str(raw[k]) for k in _PRESET_FIELDS if k in raw},
+                       extra_cookie_domains=tuple(str(x) for x in extra) if isinstance(extra, list) else (),
+                       experimental=True)
         except TypeError:
-            continue  # a required field is missing
-        if p.style not in ("hostname", "prefix") or not p.proxy_host or "{url}" not in p.login_url:
+            errors[pid] = "missing a required field (name, proxy_host, style, login_url, login_marker)"
+            continue
+        p = Preset(**{**p.__dict__, "proxy_host": p.proxy_host.lower().strip().rstrip(".")})
+        problem = _preset_problem(p)
+        if problem:
+            errors[pid] = problem
             continue
         out[p.id] = p
     return out
@@ -166,6 +249,63 @@ def settings(config: Optional[dict] = None) -> dict:
     raw = config.get("institution")
     raw = raw if isinstance(raw, dict) else {}
     return {"enabled": bool(raw.get("enabled")), "preset": raw.get("preset") or None}
+
+
+@dataclass(frozen=True)
+class Limits:
+    daily: int = DAILY_LIMIT
+    per_publisher: int = PUBLISHER_DAILY_LIMIT
+    spacing: int = MIN_SPACING
+    notes: tuple[str, ...] = ()  # what was clamped to the hard ceiling
+
+
+def limits(preset_id: str, config: Optional[dict] = None) -> Limits:
+    """The rate limits in force: defaults, then `institution.limits`, then
+    `institution.presets.<id>.limits` (keys daily, per_publisher, spacing_seconds),
+    clamped to the hard ceiling (daily <= HARD_DAILY_MAX, spacing >= HARD_MIN_SPACING)."""
+    config = config if config is not None else load_config()
+    inst = config.get("institution") if isinstance(config.get("institution"), dict) else {}
+    merged: dict = {}
+    for layer in (inst.get("limits"), ((inst.get("presets") or {}).get(preset_id) or {}).get("limits")
+                  if isinstance(inst.get("presets"), dict) else None):
+        if isinstance(layer, dict):
+            merged.update(layer)
+    notes: list[str] = []
+
+    def num(key: str, default: int) -> int:
+        v = merged.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v < 1:
+            if key in merged:
+                notes.append(f"institution limits: {key}={v!r} is not a positive number; using {default}")
+            return default
+        return int(v)
+
+    daily = num("daily", DAILY_LIMIT)
+    per_pub = num("per_publisher", PUBLISHER_DAILY_LIMIT)
+    spacing = num("spacing_seconds", MIN_SPACING)
+    if daily > HARD_DAILY_MAX:
+        notes.append(f"institution limits: daily {daily} is above the hard ceiling; using {HARD_DAILY_MAX}")
+        daily = HARD_DAILY_MAX
+    if per_pub > daily:
+        per_pub = daily
+    if spacing < HARD_MIN_SPACING:
+        notes.append(f"institution limits: spacing {spacing}s is below the hard floor; using {HARD_MIN_SPACING}s")
+        spacing = HARD_MIN_SPACING
+    return Limits(daily, per_pub, spacing, tuple(notes))
+
+
+def notify_once(text: str, emit: Callable[[str], None]) -> None:
+    """Show a limits notice once per machine (not on every download): remembered in the state dir."""
+    marker = state_dir() / "notices.json"
+    try:
+        seen = json.loads(marker.read_text(encoding="utf-8"))
+        seen = seen if isinstance(seen, list) else []
+    except (OSError, ValueError):
+        seen = []
+    if text in seen:
+        return
+    emit(text)
+    _write_private(marker, json.dumps((seen + [text])[-50:]))
 
 
 def active_preset(config: Optional[dict] = None, override: Optional[str] = None) -> Preset:
@@ -185,22 +325,26 @@ def active_preset(config: Optional[dict] = None, override: Optional[str] = None)
 
 
 def set_enabled(preset_id: Optional[str], enabled: bool) -> dict:
-    """Persist institution.enabled/preset in the config file. Returns what was written."""
+    """Persist institution.enabled/preset in the config file. Returns what was written.
+    A config file that is not valid JSON is never overwritten (it holds the gateway
+    token): InstitutionError, and the user fixes it first."""
     config_path = _config_file()
     data: dict = {}
     if config_path.exists():
         try:
             data = json.loads(config_path.read_text(encoding="utf-8"))
-        except (ValueError, OSError):
-            data = {}
+        except (ValueError, OSError) as exc:
+            reason = f"line {exc.lineno}" if isinstance(exc, json.JSONDecodeError) else type(exc).__name__
+            raise InstitutionError(f"{config_path} is not valid JSON ({reason}); fix it first, "
+                                   "fcrawl will not overwrite it") from None
         if not isinstance(data, dict):
-            data = {}
+            raise InstitutionError(f"{config_path} is not a JSON object; fix it first, fcrawl will not overwrite it")
     inst = data.get("institution") if isinstance(data.get("institution"), dict) else {}
     if preset_id:
         inst["preset"] = preset_id
     inst["enabled"] = bool(enabled)
     data["institution"] = inst
-    save_config(data, config_path)
+    _write_private(config_path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     return {"enabled": inst["enabled"], "preset": inst.get("preset")}
 
 
@@ -232,12 +376,41 @@ def _private(path: Path, directory: bool = False) -> None:
 
 
 def _write_private(path: Path, text: str) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    os.replace(tmp, path)
+    """Atomic owner-only write: a temp file with a unique name next to the target (two
+    processes never share one), then rename over it. Windows refuses the rename while
+    another process has the target open for a moment: retry briefly."""
+    write_private_bytes(path, text.encode("utf-8"))
+
+
+def write_private_bytes(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    try:
+        _private(Path(tmp))
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        for attempt in range(20):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     _private(path)
+
+
+@contextmanager
+def state_lock() -> Iterator[None]:
+    """One lock for the cookie and usage files of every preset, across processes."""
+    with open(state_dir() / "lock", "a+", encoding="utf-8") as handle, exclusive_lock(handle):
+        yield
 
 
 @dataclass
@@ -291,24 +464,43 @@ class CookieStore:
                                       bool(c.get("secure", True)), int(exp) if isinstance(exp, (int, float)) else None))
         return cls(preset=preset_id, cookies=cookies, captured=raw.get("captured"), source=raw.get("source"))
 
-    def save(self) -> Path:
+    def save(self, merge: bool = False) -> Path:
+        """Write the store. merge=True (cookies the proxy handed out during a download):
+        under the state lock, keep what another fcrawl process saved meanwhile and lay
+        ours over it, so parallel downloads do not drop each other's cookies. A fresh
+        login saves with merge=False and replaces the file."""
         p = self.path_for(self.preset)
-        data = {"preset": self.preset, "captured": self.captured, "source": self.source,
-                "cookies": [c.__dict__ for c in self.cookies]}
-        _write_private(p, json.dumps(data, indent=2))
+        with state_lock():
+            cookies = self.cookies
+            if merge:
+                ours = {(c.name, c.domain, c.path) for c in self.cookies}
+                disk = [c for c in CookieStore.load(self.preset).cookies if (c.name, c.domain, c.path) not in ours]
+                cookies = disk + self.cookies
+            data = {"preset": self.preset, "captured": self.captured, "source": self.source,
+                    "cookies": [c.__dict__ for c in cookies]}
+            _write_private(p, json.dumps(data, indent=2))
         self.dirty = False
         return p
 
     def delete(self) -> bool:
         p = self.path_for(self.preset)
-        if p.exists():
-            p.unlink()
-            return True
+        with state_lock():
+            if p.exists():
+                p.unlink()
+                return True
         return False
 
+    def for_url(self, preset: Preset, url: str, now: Optional[float] = None) -> dict[str, str]:
+        """Cookies to send with a request to `url`: only over https (never in clear text,
+        whatever a redirect says), only when the host is the proxy or under it, and only
+        cookies whose domain covers that host. Anything else gets nothing."""
+        if not preset.secure_url(url):
+            return {}
+        return self.for_host(preset, urlsplit(url).hostname or "", now)
+
     def for_host(self, preset: Preset, host: str, now: Optional[float] = None) -> dict[str, str]:
-        """Cookies to send to `host`: only when host is the proxy (or under it), and only
-        cookies whose domain covers it. Anything else gets nothing, whatever the jar holds."""
+        """The host part of for_url (the scheme check is for_url's): cookies whose domain
+        covers `host`, when host is the proxy or under it."""
         if not preset.under_proxy(host):
             return {}
         out: dict[str, str] = {}
@@ -316,6 +508,10 @@ class CookieStore:
             if c.matches(host) and not c.expired(now):
                 out[c.name] = c.value
         return out
+
+    def live(self, now: Optional[float] = None) -> bool:
+        """Any unexpired cookie on file (a session cookie counts until the proxy says no)."""
+        return any(not c.expired(now) for c in self.cookies)
 
     def soonest_expiry(self) -> Optional[int]:
         times = [c.expires for c in self.cookies if c.expires]
@@ -329,34 +525,87 @@ def _keep(preset: Preset, cookies: list[Cookie]) -> list[Cookie]:
     return kept
 
 
-def cookies_from_browser(preset: Preset, browser: str, profile: Optional[str] = None) -> list[Cookie]:
+def cookies_from_browser(preset: Preset, browser: str, profile: Optional[str] = None,
+                         warn: Callable[[str], None] = lambda m: print(m, file=sys.stderr)) -> list[Cookie]:
     """The proxy's cookies out of a desktop browser's cookie database (yt-dlp's extractor,
-    which fcrawl already ships). Chrome/Edge on Windows encrypt cookies so that only the
-    browser can read them (app-bound encryption): Firefox works everywhere."""
+    which fcrawl already ships). A fallback, not the main path (`fcrawl auth login` opens
+    its own browser window): Chrome/Edge on Windows encrypt cookies so only they can read
+    them, a running Chromium locks the file, and a session cookie (ntut's HYSID) may never
+    reach the database at all (Firefox keeps session cookies in memory). yt-dlp's
+    warnings say which of these happened, so they are passed on (they carry no values)."""
     from yt_dlp.cookies import extract_cookies_from_browser  # lazy: imports sqlite/keyring helpers
 
-    class _Quiet:
-        def debug(self, *_: Any) -> None: ...
-        def info(self, *_: Any) -> None: ...
-        def warning(self, *_: Any) -> None: ...
-        def error(self, msg: str) -> None:
-            print(msg, file=sys.stderr)
+    warnings: list[str] = []
+
+    class _Logger:
+        def debug(self, *_: Any, **__: Any) -> None: ...
+        def info(self, *_: Any, **__: Any) -> None: ...
+
+        def warning(self, msg: str, *_: Any, **__: Any) -> None:
+            line = str(msg).splitlines()[0][:200] if msg else ""
+            if line and line not in warnings:
+                warnings.append(line)
+
+        def error(self, msg: str, *_: Any, **__: Any) -> None:
+            self.warning(msg)
 
     try:
-        jar = extract_cookies_from_browser(browser, profile, logger=_Quiet())
+        jar = extract_cookies_from_browser(browser, profile, logger=_Logger())
     except Exception as exc:  # yt-dlp raises DownloadError/CookieLoadError with a readable text
         raise InstitutionError(f"could not read {browser} cookies: {str(exc).splitlines()[0][:200]}") from None
-    return _keep(preset, [_from_cookiejar(c) for c in jar])
+    finally:
+        for line in warnings[:3]:
+            warn(f"{browser}: {line}")
+    try:
+        return _keep(preset, [_from_cookiejar(c) for c in jar])
+    except NotLoggedIn:
+        hint = (f" ({preset.session_cookie} is a session cookie, which {browser} may keep in memory only; "
+                "use the browser window of plain `fcrawl auth login`, --cookie-file or --paste)") \
+            if preset.session_cookie else ""
+        raise NotLoggedIn(f"no cookies for {preset.proxy_host} in {browser}'s cookie store{hint}") from None
+
+
+def parse_netscape(text: str) -> list[Cookie]:
+    """A Netscape cookies.txt, tolerantly: tab-separated domain, include-subdomains flag,
+    path, secure, expiry, name, value; `#HttpOnly_` prefixes; blank lines and comments.
+    The flag column is ignored (a leading dot on the domain decides, as browsers do):
+    exporters disagree about it and Python's own parser refuses such files. Problems
+    are reported by line number only, never with the line (it holds a cookie value)."""
+    cookies: list[Cookie] = []
+    bad: list[int] = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.rstrip("\r\n")
+        if line.startswith("#HttpOnly_"):
+            line = line[len("#HttpOnly_"):]
+        elif not line.strip() or line.lstrip().startswith(("#", "$")):
+            continue
+        fields = line.split("\t")
+        if len(fields) == 6:
+            fields.append("")  # an empty value with its tab trimmed
+        if len(fields) != 7 or not fields[0].strip() or not fields[5].strip():
+            bad.append(n)
+            continue
+        domain, _flag, path, secure, expires, name, value = (f.strip() for f in fields)
+        try:
+            exp = int(float(expires)) if expires else 0
+        except ValueError:
+            bad.append(n)
+            continue
+        cookies.append(Cookie(name, value, domain, path or "/", secure.upper() == "TRUE", exp or None))
+    if bad and not cookies:
+        shown = ", ".join(str(n) for n in bad[:5]) + ("…" if len(bad) > 5 else "")
+        raise InstitutionError(f"not a Netscape cookies.txt (lines {shown} do not have the 7 tab-separated "
+                               "fields); export it again with a 'Get cookies.txt' extension")
+    return cookies
 
 
 def cookies_from_file(preset: Preset, path: str) -> list[Cookie]:
     """A Netscape cookies.txt (what the 'Get cookies.txt' browser extensions export)."""
-    jar = http.cookiejar.MozillaCookieJar()
     try:
-        jar.load(path, ignore_discard=True, ignore_expires=True)
-    except (OSError, http.cookiejar.LoadError) as exc:
-        raise InstitutionError(f"cannot read cookie file {path}: {exc}") from None
-    return _keep(preset, [_from_cookiejar(c) for c in jar])
+        text = Path(path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise InstitutionError(f"cannot read cookie file {path}: {exc.strerror or type(exc).__name__}") from None
+    return _keep(preset, parse_netscape(text))
 
 
 def cookies_from_header(preset: Preset, header: str) -> list[Cookie]:
@@ -372,7 +621,8 @@ def cookies_from_header(preset: Preset, header: str) -> list[Cookie]:
     return _keep(preset, cookies)
 
 
-def _from_cookiejar(c: http.cookiejar.Cookie) -> Cookie:
+def _from_cookiejar(c: Any) -> Cookie:
+    """An http.cookiejar.Cookie (what yt-dlp and requests hand out) as ours."""
     return Cookie(c.name, c.value or "", c.domain or "", c.path or "/", bool(c.secure),
                   int(c.expires) if c.expires else None)
 
@@ -399,27 +649,34 @@ class Usage:
     day: str = ""
     total: int = 0
     publishers: dict[str, int] = field(default_factory=dict)
-    last: float = 0.0  # epoch of the last proxied paper request
+    last: float = 0.0  # epoch of the last proxied paper request (or the reserved slot)
+    limits: Limits = field(default_factory=Limits)
 
     @staticmethod
     def path_for(preset_id: str) -> Path:
         return state_dir() / f"{preset_id}.usage.json"
 
     @classmethod
-    def load(cls, preset_id: str) -> "Usage":
+    def load(cls, preset_id: str, lim: Optional[Limits] = None) -> "Usage":
+        """The usage on file. A missing or unreadable file starts from zero: the limits are
+        the user's own brake, not a security boundary (deleting the file resets them)."""
+        lim = lim or Limits()
         p = cls.path_for(preset_id)
         if not p.exists():
-            return cls(preset=preset_id)
+            return cls(preset=preset_id, limits=lim)
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
             pubs = raw.get("publishers") if isinstance(raw.get("publishers"), dict) else {}
             return cls(preset=preset_id, day=str(raw.get("day") or ""), total=int(raw.get("total") or 0),
-                       publishers={str(k): int(v) for k, v in pubs.items()}, last=float(raw.get("last") or 0))
-        except (ValueError, OSError, TypeError):
-            return cls(preset=preset_id)
+                       publishers={str(k): int(v) for k, v in pubs.items()}, last=float(raw.get("last") or 0),
+                       limits=lim)
+        except (ValueError, OSError, TypeError, AttributeError):
+            return cls(preset=preset_id, limits=lim)
 
     def save(self) -> None:
-        _write_private(self.path_for(self.preset), json.dumps(self.__dict__, indent=2))
+        data = {"preset": self.preset, "day": self.day, "total": self.total, "publishers": self.publishers,
+                "last": self.last}
+        _write_private(self.path_for(self.preset), json.dumps(data, indent=2))
 
     def _roll(self, today: str) -> None:
         if self.day != today:
@@ -427,15 +684,20 @@ class Usage:
 
     def check(self, publisher: str, now: float, today: str) -> float:
         """RateLimited if today's quota is used up; else the seconds to wait before the next
-        request (0 when none)."""
+        request (0 when none). A `last` far in the future means the clock was turned back:
+        then one spacing, not hours."""
+        lim = self.limits
         self._roll(today)
-        if self.total >= DAILY_LIMIT:
-            raise RateLimited(f"daily limit reached ({DAILY_LIMIT} papers through the institution proxy per day); "
+        if self.total >= lim.daily:
+            raise RateLimited(f"daily limit reached ({lim.daily} papers through the institution proxy per day); "
                               "try again tomorrow")
-        if self.publishers.get(publisher, 0) >= PUBLISHER_DAILY_LIMIT:
-            raise RateLimited(f"daily limit for {publisher} reached ({PUBLISHER_DAILY_LIMIT} papers per publisher "
+        if self.publishers.get(publisher, 0) >= lim.per_publisher:
+            raise RateLimited(f"daily limit for {publisher} reached ({lim.per_publisher} papers per publisher "
                               "per day); try again tomorrow")
-        return max(0.0, self.last + MIN_SPACING - now)
+        wait = self.last + lim.spacing - now
+        if wait > lim.spacing * (lim.daily + 1):
+            return float(lim.spacing)
+        return max(0.0, wait)
 
     def record(self, publisher: str, now: float, today: str) -> None:
         self._roll(today)
@@ -443,6 +705,19 @@ class Usage:
         self.publishers[publisher] = self.publishers.get(publisher, 0) + 1
         self.last = now
         self.save()
+
+    @classmethod
+    def reserve(cls, preset_id: str, publisher: str, now: float, lim: Optional[Limits] = None) -> float:
+        """Count one paper and book its time slot, atomically across fcrawl processes:
+        under the state lock, read the file, check the limits, record the paper at
+        now + wait and write it back. Returns the wait; the caller sleeps it after the
+        lock is released, so parallel downloads queue up 'spacing' seconds apart."""
+        with state_lock():
+            usage = cls.load(preset_id, lim)
+            today = date.fromtimestamp(now).isoformat()
+            wait = usage.check(publisher, now, today)
+            usage.record(publisher, now + wait, today)
+        return wait
 
 
 # --- HTTP through the proxy ---------------------------------------------------------------
@@ -480,12 +755,18 @@ def follow(preset: Preset, store: CookieStore, url: str, timeout: int, stream: b
     login_hops = 0
     bounced: set[str] = set()  # publisher hosts the proxy sent us out to (it does not proxy them)
     for _ in range(MAX_REDIRECTS + 1):
-        resp = get(current, store.for_host(preset, _host(current)), timeout, stream)
+        resp = get(current, store.for_url(preset, current), timeout, stream)
         resp.request_url = current  # type: ignore[attr-defined]
-        _absorb_cookies(preset, store, resp, _host(current))
+        if preset.secure_url(current):
+            _absorb_cookies(preset, store, resp, _host(current))
         at_login = _is_login_url(preset, current)
         if resp.status_code in (301, 302, 303, 307, 308) and resp.headers.get("Location"):
             location = urljoin(current, resp.headers["Location"])
+            loc = urlsplit(location)
+            if preset.under_proxy(loc.hostname or "") and loc.scheme != preset.scheme:
+                # a downgrade to http on the proxy: go on over https (cookies never travel in
+                # clear text; for_url would send none, and the page would then look logged out)
+                location = loc._replace(scheme=preset.scheme).geturl()
             if _is_login_url(preset, location):
                 login_hops += 1
                 if login_hops > 1:
@@ -619,9 +900,28 @@ def interstitial_targets(page_url: str, html: str) -> list[str]:
     return out
 
 
-def _is_pdf(resp: requests.Response, head: bytes) -> bool:
-    ctype = (resp.headers.get("Content-Type") or "").lower()
-    return head.startswith(b"%PDF") or ("application/pdf" in ctype and not head.startswith(b"<"))
+def _is_pdf(head: bytes) -> bool:
+    """A PDF starts with `%PDF-` within its first 1024 bytes (the spec's allowance for junk
+    before the header). The Content-Type is not trusted: a login page served as
+    application/pdf, with or without leading whitespace, is not a paper."""
+    return b"%PDF-" in head[:1024]
+
+
+def _head(chunks_iter: Any, want: int = 1024) -> bytes:
+    """At least `want` bytes from the start of a body (fewer only when it is shorter)."""
+    head = b""
+    while len(head) < want:
+        chunk = next(chunks_iter, None)
+        if chunk is None:
+            break
+        head += chunk
+    return head
+
+
+def _save_pdf(out_path: Path, body: bytes, where: str) -> None:
+    if len(body) < MIN_PDF_BYTES:
+        raise InstitutionError(f"{where} answered with only {len(body)} bytes; that is not a paper")
+    write_private_bytes(out_path, body)  # 0600: a paywalled paper is for this user only
 
 
 def _read_body(chunks_iter: Any, limit: int = MAX_PDF_BYTES, already: int = 0) -> bytes:
@@ -670,29 +970,27 @@ class Fetched:
     hops: list[str]
 
 
-def fetch_pdf(preset: Preset, store: CookieStore, url: str, out_path: Path, usage: Optional[Usage] = None,
+def fetch_pdf(preset: Preset, store: CookieStore, url: str, out_path: Path, lim: Optional[Limits] = None,
               get: Optional[Callable[..., requests.Response]] = None, clock: Optional[Callable[[], float]] = None,
               sleep: Optional[Callable[[float], None]] = None, note: Callable[[str], None] = lambda _m: None) -> Fetched:
     """Download the PDF of a publisher URL (landing page, DOI link or direct PDF) through
-    the proxy to out_path. Counts against the rate limits before the first byte."""
-    if not store.cookies:
+    the proxy to out_path. Counts against the rate limits before the first byte (a
+    failure counts too); no session on file costs nothing."""
+    if not store.live():
         raise NotLoggedIn("no institution session on file; run: fcrawl auth login")
     get, clock, sleep = get or http_get, clock or time.time, sleep or time.sleep
-    usage = usage or Usage.load(preset.id)
+    lim = lim or limits(preset.id)
     target_url = url
     if _host(url) in DOI_HOSTS:
         target_url = resolve_doi(url, get)
         if target_url != url:
             note(f"DOI resolves to {target_url[:100]}")
-    publisher = publisher_of(target_url)
-    now = clock()
-    today = date.fromtimestamp(now).isoformat()
-    wait = usage.check(publisher, now, today)
+    # an already-proxied URL counts for its publisher, not for the library
+    publisher = publisher_of(_unproxy(preset, target_url) if preset.under_proxy(_host(target_url)) else target_url)
+    wait = Usage.reserve(preset.id, publisher, clock(), lim)
     if wait > 0:
-        note(f"waiting {wait:.0f}s (at least {MIN_SPACING}s between two papers through the proxy)")
+        note(f"waiting {wait:.0f}s (at least {lim.spacing}s between two papers through the proxy)")
         sleep(wait)
-        now = clock()
-    usage.record(publisher, now, date.fromtimestamp(now).isoformat())
 
     hops: list[str] = []
     tried: set[str] = set()
@@ -720,14 +1018,13 @@ def fetch_pdf(preset: Preset, store: CookieStore, url: str, out_path: Path, usag
                 queue = [c for c in pdf_candidates(target, "") if c not in queue] + queue
             continue
         it = resp.iter_content(chunk_size=64 * 1024)
-        head = next(it, b"")
-        if _is_pdf(resp, head):
+        head = _head(it)
+        if _is_pdf(head):
             body = head + _read_body(it, already=len(head))
             resp.close()
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_bytes(body)
+            _save_pdf(out_path, body, _host(final) or "the proxy")
             if store.dirty:
-                store.save()
+                store.save(merge=True)
             return Fetched(out_path, len(body), url, final, hops)
         body = (head + _read_body(it, 5 * 1024 * 1024, len(head))).decode("utf-8", "replace")
         resp.close()
@@ -749,6 +1046,8 @@ def fetch_pdf(preset: Preset, store: CookieStore, url: str, out_path: Path, usag
                 if cand not in queue:
                     queue.append(cand)
     where = html_seen[0][:80] if html_seen else url[:80]
+    if store.dirty:
+        store.save(merge=True)  # the per-host handshake cookies help the next attempt
     if challenged:
         raise NeedsBrowser(f"{publisher} serves its PDFs only after a JavaScript challenge, which fcrawl cannot run; "
                            f"open the paper in your browser through the library instead: {preset.rewrite(target_url)}")
@@ -772,14 +1071,13 @@ def fetch_free_pdf(url: str, out_path: Path, get: Optional[Callable[..., request
             resp.close()
             raise InstitutionError(f"{resp.status_code} from {_host(current)} for {url[:80]}")
         it = resp.iter_content(chunk_size=64 * 1024)
-        head = next(it, b"")
-        if not _is_pdf(resp, head):
+        head = _head(it)
+        if not _is_pdf(head):
             resp.close()
             raise InstitutionError(f"{url[:80]} did not answer with a PDF (got {resp.headers.get('Content-Type')})")
         body = head + _read_body(it, already=len(head))
         resp.close()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_bytes(body)
+        _save_pdf(out_path, body, _host(current))
         return Fetched(out_path, len(body), url, current, hops)
     raise InstitutionError(f"too many redirects from {url[:80]}")
 
@@ -806,7 +1104,7 @@ def probe(preset: Preset, store: CookieStore, get: Optional[Callable[..., reques
     try:
         resp = follow(preset, store, preset.rewrite(preset.probe_url), PROBE_TIMEOUT, get=get)
         if store.dirty:
-            store.save()
+            store.save(merge=True)
     except NotLoggedIn as exc:
         return {"ok": False, "detail": str(exc)}
     except InstitutionError as exc:

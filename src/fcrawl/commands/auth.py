@@ -70,7 +70,11 @@ def enable_cmd(preset: str):
     """Turn the institution proxy on for PRESET (e.g. ntut). Written to .fcrawlrc."""
     if preset not in inst.presets(load_config()):
         _fail(inst.InstitutionError(f"unknown preset {preset!r}; fcrawl auth presets lists them"))
-    written = inst.set_enabled(preset, True)
+    try:
+        written = inst.set_enabled(preset, True)
+    except inst.InstitutionError as exc:
+        _fail(exc)
+        return
     click.echo(f"institution proxy enabled: {written['preset']}")
     click.echo("next: fcrawl auth login")
 
@@ -78,7 +82,11 @@ def enable_cmd(preset: str):
 @auth.command("disable")
 def disable_cmd():
     """Turn the institution proxy off (cookies stay on disk; fcrawl auth logout removes them)."""
-    written = inst.set_enabled(None, False)
+    try:
+        written = inst.set_enabled(None, False)
+    except inst.InstitutionError as exc:
+        _fail(exc)
+        return
     click.echo(f"institution proxy disabled (preset kept: {written.get('preset') or 'none'})")
 
 
