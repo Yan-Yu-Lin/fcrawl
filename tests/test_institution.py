@@ -661,7 +661,7 @@ def test_papers_fetch_cli(env):
     line = [ln for ln in res.stdout.splitlines() if ln.startswith("RESULT ")][0]
     assert "provider=institution:ntut" in line and "status=ok" in line and f"bytes={len(PDF)}" in line
     path = line.split("path=", 1)[1].split(" provider=")[0]
-    assert Path(path).read_bytes() == PDF and "fcrawl-saved" in path
+    assert Path(path).read_bytes() == PDF and Path(path).parent == I.state_dir().parent / "papers"
     res = run("papers", "fetch", "doi:10.1109/TPEL.2012.2223718", "-o", str(tmp / "mine.pdf"), "--json")
     assert res.exit_code == 0, res.output
     data = json.loads(res.stdout)
@@ -695,4 +695,5 @@ def test_papers_pdf_points_at_fetch_when_enabled(env, monkeypatch):
     assert "school or library access" in res.output and "papers fetch" not in res.output
     enable()
     res = run("papers", "pdf", "doi:10.1/x", "--no-scholar")
-    assert "fcrawl papers fetch doi:10.1/x" in res.output
+    assert "fcrawl auth login" in res.output and "status=" not in res.output  # no session: nothing tried
+    assert not I.Usage.path_for("ntut").exists()

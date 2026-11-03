@@ -1061,7 +1061,9 @@ KIND_ORDER = {"publisher-oa": 0, "repository": 1, "author-site": 2, "social-uplo
 @click.option("--no-scholar", is_flag=True, help="Do not spend a Serper credit on a Scholar lookup")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 @click.option("--no-cache", is_flag=True, help="Bypass the local cache")
-def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool):
+@click.option("--no-institution", is_flag=True,
+              help="Do not fall back to your library proxy when no free copy exists")
+def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool, no_institution: bool):
     """Find a legal free copy of a paper (arXiv, OpenAlex, Semantic Scholar, trusted Scholar links).
 
     \b
@@ -1069,6 +1071,8 @@ def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool):
     authors' university pages. ResearchGate/Academia uploads are listed but flagged;
     links from unknown hosts are not shown. Then read it with:
         fcrawl scrape <url> --save-temp
+    When there is no free copy and your library proxy is on (fcrawl auth), the PDF is
+    downloaded through it: RESULT path=… provider=institution:<preset> status=ok.
     """
     pid = normalize_id(paper_id)
     kind = pid.partition(":")[0]
@@ -1134,9 +1138,14 @@ def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool):
     doi = work.get("ids", {}).get("doi") or (pid.partition(":")[2] if kind == "doi" else None)
     if scholar_credits:
         console.print(f"[dim]credits: {scholar_credits} Serper (Scholar lookup)[/dim]", highlight=False)
+    confirmed_free = any(c["kind"] != "social-upload" for c in cands)
+    inst = None
+    if not confirmed_free and not no_institution:
+        inst = _pdf_through_institution(pid, doi)
     if json_output:
         emit_json({"id": pid, "title": title, "found": bool(cands), "candidates": cands, "notes": notes,
-                   "doiUrl": f"https://doi.org/{doi}" if doi else None, "scholarCredits": scholar_credits}, None)
+                   "doiUrl": f"https://doi.org/{doi}" if doi else None, "scholarCredits": scholar_credits,
+                   "institution": inst}, None)
         return
     head = title or pid
     if work.get("year"):
@@ -1155,19 +1164,59 @@ def pdf_cmd(paper_id: str, no_scholar: bool, json_output: bool, no_cache: bool):
         out("---")
         if best:
             out(f"read it: fcrawl scrape {one_line(best['url'])} --save-temp")
-        else:
-            # only ResearchGate/Academia uploads: not a confirmed legal copy, so no
-            # ready-made scrape line; the user decides
-            out("Only an author upload with unclear copyright was found; ask the user before using it,")
-            out("or get the paper through their own school or library access.")
+            return
+        # only ResearchGate/Academia uploads: not a confirmed legal copy, so no
+        # ready-made scrape line; the user decides (or their library has it)
+        if _print_institution(inst):
+            return
+        out("Only an author upload with unclear copyright was found; ask the user before using it,")
+        out("or get the paper through their own school or library access.")
         return
     out("No legal free copy found.")
     if doi:
         out(f"  Publisher page (usually abstract only): https://doi.org/{doi}")
-    if institution.settings().get("enabled"):
-        out(f"  Through your library (institution proxy is on): fcrawl papers fetch {pid}")
-    else:
+    if _print_institution(inst):
+        return
+    if not (inst and inst.get("tried")):
         out("  For the full text, download it with your own school or library access on your own computer.")
+
+
+def _pdf_through_institution(pid: str, doi: Optional[str]) -> Optional[dict]:
+    """`papers pdf` found no free copy: try the user's library proxy when it is on and a
+    DOI is known (also one OpenAlex found for a pmid/pmcid). None when the feature is off.
+    {'tried': bool, 'ok': bool, 'path', 'bytes', 'provider', 'error', 'command'}."""
+    if not institution.settings().get("enabled"):
+        return None
+    if not doi:
+        return {"tried": False, "ok": False, "error": "no DOI known for this paper; the library proxy needs one"}
+    target = f"https://doi.org/{doi}"
+    label = f"doi:{doi}"
+    command = f"fcrawl papers fetch {label}"
+    try:
+        preset = institution.active_preset()
+        if not institution.CookieStore.load(preset.id).live():
+            return {"tried": False, "ok": False, "command": command,
+                    "error": "no library session on file: the user has to run `fcrawl auth login` themselves "
+                             "(it opens a browser window; never ask for their password)"}
+        fetched, provider = _institution_fetch(target, _default_pdf_path(label))
+    except (institution.InstitutionError, requests.RequestException, OSError) as exc:
+        return {"tried": True, "ok": False, "command": command, "url": target, "error": _fetch_failure(exc)}
+    return {"tried": True, "ok": True, "path": str(fetched.path), "bytes": fetched.size, "url": target,
+            "pdfUrl": fetched.pdf_url, "provider": provider}
+
+
+def _print_institution(inst: Optional[dict]) -> bool:
+    """The library-proxy part of `papers pdf`'s text output. True when it produced the PDF."""
+    if not inst:
+        return False
+    if inst.get("ok"):
+        out("Through your library (institution proxy):")
+        out(f"RESULT path={inst['path']} provider={inst['provider']} url={inst['url']} status=ok bytes={inst['bytes']}")
+        return True
+    out(f"  Through your library: {one_line(inst.get('error') or 'failed')}")
+    if inst.get("tried"):
+        out(f"RESULT provider=institution url={inst.get('url')} status=failed")
+    return False
 
 
 # --- fetch: the full text through the user's own library proxy ------------------------
@@ -1197,10 +1246,46 @@ def _fetch_filename(label: str) -> str:
     return (safe or "paper") + ".pdf"
 
 
+
+
+def _default_pdf_path(label: str):
+    """Where a fetched PDF goes without -o: ~/.fcrawl/papers (owner-only, not the shared
+    temp folder, since a paywalled paper is for this user only)."""
+    return institution.state_dir().parent / "papers" / _fetch_filename(label)
+
+
+def _note(m: str) -> None:
+    console.print(f"[dim]{escape(m)}[/dim]", highlight=False)
+
+
+def _institution_fetch(target: str, out_path) -> tuple["institution.Fetched", str]:
+    """The PDF behind a publisher URL / DOI link through the enabled institution proxy.
+    Raises InstitutionError (NotEnabled, NotLoggedIn, RateLimited, ...)."""
+    preset = institution.active_preset()
+    lim = institution.limits(preset.id)
+    for n in lim.notes:
+        institution.notify_once(n, _note)
+    store = institution.CookieStore.load(preset.id)
+    fetched = institution.fetch_pdf(preset, store, target, out_path, lim=lim, note=_note)
+    return fetched, f"institution:{preset.id}"
+
+
+def _fetch_failure(exc: BaseException) -> str:
+    """One line for a failed download, without a traceback; never a cookie value (the
+    errors below carry hosts and truncated URLs only)."""
+    if isinstance(exc, institution.InstitutionError):
+        return str(exc)
+    if isinstance(exc, requests.RequestException):
+        return f"network error ({type(exc).__name__})"
+    if isinstance(exc, OSError):
+        return f"cannot write the PDF: {exc.strerror or type(exc).__name__}"
+    return type(exc).__name__
+
+
 @papers.command("fetch")
 @click.argument("paper_id", metavar="ID_OR_URL")
 @click.option("-o", "--output", "output", default=None, type=click.Path(dir_okay=False),
-              help="Where to save the PDF (default: the fcrawl-saved/papers temp folder)")
+              help="Where to save the PDF (default: ~/.fcrawl/papers/)")
 @click.option("--json", "json_output", is_flag=True, help="Output as JSON")
 def fetch_cmd(paper_id: str, output: Optional[str], json_output: bool):
     """Download a paper's PDF through your own library proxy (fcrawl auth), to a local file.
@@ -1208,38 +1293,30 @@ def fetch_cmd(paper_id: str, output: Optional[str], json_output: bool):
     \b
     Needs `fcrawl auth enable <preset>` and a session from `fcrawl auth login`.
     The request goes from this machine to the library proxy only, never through the
-    gateway or Firecrawl. Built-in limits: 20 papers a day, 10 per publisher, 30 s apart.
-    arXiv / PMC ids are free and are fetched directly.
+    gateway or Firecrawl. Default limits: 20 papers a day, 10 per publisher, 30 s apart
+    (institution.limits in .fcrawlrc). arXiv / PMC ids are free and fetched directly.
+    `papers pdf ID` already falls through to this when no free copy exists.
     """
     from pathlib import Path
 
-    from ..utils.platform import tmp_root
-
     label, target, needs_proxy = _fetch_target(paper_id)
-    out_path = Path(output) if output else tmp_root() / "fcrawl-saved" / "papers" / _fetch_filename(label)
+    out_path = Path(output) if output else _default_pdf_path(label)
     try:
         if needs_proxy:
-            preset = institution.active_preset()
-            store = institution.CookieStore.load(preset.id)
-            fetched = institution.fetch_pdf(preset, store, target, out_path,
-                                            note=lambda m: console.print(f"[dim]{escape(m)}[/dim]", highlight=False))
-            provider = f"institution:{preset.id}"
+            fetched, provider = _institution_fetch(target, out_path)
         else:
             fetched = institution.fetch_free_pdf(target, out_path)
             provider = "direct"
-    except institution.InstitutionError as exc:
-        console.print(f"[red]Error: {escape(str(exc))}[/red]", highlight=False)
+    except (institution.InstitutionError, requests.RequestException, OSError) as exc:
+        why = _fetch_failure(exc)
+        console.print(f"[red]Error: {escape(why)}[/red]", highlight=False)
         if json_output:
-            emit_json({"id": label, "ok": False, "error": str(exc)}, None)
+            emit_json({"id": label, "ok": False, "url": target, "error": why}, None)
         else:
             out(f"RESULT provider={'institution' if needs_proxy else 'direct'} url={target} status=failed")
-        raise click.Abort()
-    except requests.RequestException as exc:
-        console.print(f"[red]Error: {type(exc).__name__} while fetching {escape(target)}[/red]", highlight=False)
         raise click.Abort()
     if json_output:
         emit_json({"id": label, "ok": True, "path": str(fetched.path), "bytes": fetched.size, "url": target,
                    "pdfUrl": fetched.pdf_url, "provider": provider}, None)
         return
     out(f"RESULT path={fetched.path} provider={provider} url={target} status=ok bytes={fetched.size}")
-
